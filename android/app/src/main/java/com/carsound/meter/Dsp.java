@@ -72,6 +72,10 @@ public final class Dsp {
     }
 
     public static float[] makeSweep(int fs) {
+        return makeSweep(fs, T);
+    }
+
+    public static float[] makeSweep(int fs, double T) {
         int n = (int) Math.round(T * fs), fd = (int) Math.round(0.05 * fs);
         double K = Math.log(F2 / F1);
         float[] s = new float[n];
@@ -93,6 +97,66 @@ public final class Dsp {
         System.arraycopy(sw, 0, L, ld, sw.length);
         System.arraycopy(sw, 0, R, lr ? ld + sw.length + gp : ld, sw.length);
         return new float[][]{L, R};
+    }
+
+    // ---------- 입력 진단: 같은 스윕을 큰 소리와 12dB 작은 소리로 두 번 재생 ----------
+
+    public static final double DT = 3, DGAP = 1.5, DQUIET = 0.25;
+
+    public static float[][] diagStimulus(int fs) {
+        float[] sw = makeSweep(fs, DT);
+        int ld = (int) Math.round(LEAD * fs), gp = (int) Math.round(DGAP * fs), tl = (int) Math.round(1.5 * fs);
+        int len = ld + 2 * sw.length + gp + tl;
+        float[] L = new float[len], R = new float[len];
+        for (int i = 0; i < sw.length; i++) {
+            L[ld + i] = R[ld + i] = sw[i];
+            L[ld + sw.length + gp + i] = R[ld + sw.length + gp + i] = (float) (sw[i] * DQUIET);
+        }
+        return new float[][]{L, R};
+    }
+
+    /** 한 입력 방식의 진단 결과 */
+    public static final class Diag {
+        /** 작은 소리 - 큰 소리 레벨 차(dB). 정상이라면 약 -12dB */
+        public double levelDiff;
+        /** 자동 음량 조절 흔적: |levelDiff - (-12)| */
+        public double linErr;
+        /** 40~80Hz 레벨 - 300Hz~3kHz 레벨(dB). 높을수록 저음을 덜 깎음 */
+        public double lowRel;
+        /** 8~12kHz 레벨 - 300Hz~3kHz 레벨(dB) */
+        public double highRel;
+        public double snr;
+    }
+
+    static double bandMean(double[] db, double lo, double hi) {
+        double s = 0; int c = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= lo && FR[i] <= hi) { s += db[i]; c++; }
+        return s / c;
+    }
+
+    public static Diag diagnose(float[] rec, int fs) {
+        float[] sw = makeSweep(fs, DT);
+        double[] h = deconv(rec, sw, fs);
+        int N = h.length, WL = 1;
+        while (WL < 0.34 * fs) WL <<= 1;
+        int pk = 0; double pv = 0;
+        for (int i = 0; i < N; i++) { double a = Math.abs(h[i]); if (a > pv) { pv = a; pk = i; } }
+        int D = (int) Math.round((DT + DGAP) * fs), r = (int) Math.round(0.05 * fs);
+        double[] a = localMax(h, pk + D, r), b = localMax(h, pk - D, r);
+        int loud, quiet;
+        if (a[0] > b[0]) { loud = pk; quiet = (int) a[1]; } else { loud = (int) b[1]; quiet = pk; }
+        int pre = (int) Math.round(0.002 * fs);
+        double[] sl = seg(h, loud - pre, WL), sq = seg(h, quiet - pre, WL);
+        double[] dl = spectrum(sl, fs), dq = spectrum(sq, fs);
+        Diag d = new Diag();
+        d.levelDiff = bandMean(dq, 200, 4000) - bandMean(dl, 200, 4000);
+        d.linErr = Math.abs(d.levelDiff - 20 * Math.log10(DQUIET));
+        double mid = bandMean(dl, 300, 3000);
+        d.lowRel = bandMean(dl, 40, 80) - mid;
+        d.highRel = bandMean(dl, 8000, 12000) - mid;
+        double nz = energy(seg(h, quiet + (int) Math.round(0.45 * fs), WL));
+        d.snr = 10 * Math.log10(energy(sl) / Math.max(nz, 1e-30));
+        return d;
     }
 
     public static void fft(double[] re, double[] im, boolean inv) {
