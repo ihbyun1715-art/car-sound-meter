@@ -263,7 +263,10 @@ public final class Dsp {
         public final String name;
         public int p, raw;
         public double E, snr, thd;
+        /** 300Hz~3kHz를 목표 곡선에 맞춘 응답(dB) */
         public double[] n;
+        /** 맞추기 전 원래 레벨(dB). 노브 학습처럼 절대 변화량이 필요할 때 쓴다 */
+        public double[] rawDb;
         Channel(String name, int p, int raw) { this.name = name; this.p = p; this.raw = raw; }
     }
 
@@ -275,9 +278,20 @@ public final class Dsp {
         public Channel[] ch;
     }
 
+    /** 목표에서 크게 벗어난 구간 */
     public static final class Issue {
+        /** 가장 크게 벗어난 주파수와 그 편차(dB) */
         public final double f, v;
-        Issue(double f, double v) { this.f = f; this.v = v; }
+        /** 구간 범위 */
+        public final double fLo, fHi;
+        /** 1/3옥타브보다 좁은 구간인지 */
+        public final boolean narrow;
+        /** 위치에 따라 크게 달라지는 구간인지 */
+        public final boolean posDep;
+        Issue(double f, double v, double fLo, double fHi, boolean posDep) {
+            this.f = f; this.v = v; this.fLo = fLo; this.fHi = fHi; this.posDep = posDep;
+            this.narrow = log2(fHi / fLo) < 0.34;
+        }
     }
 
     /** 여러 측정을 합친 최종 결과 */
@@ -287,7 +301,8 @@ public final class Dsp {
         public Channel[] ch;
         public double clip, rms, fb, thd, snr, total, tone, bass, clar;
         public double bal = Double.NaN, dly = Double.NaN, balScore = Double.NaN;
-        public double[] avg;
+        public double[] avg, dev, spread;
+        public Pref pref;
         public final List<Issue> issues = new ArrayList<>();
         public final int[] eqGain = new int[EQ_BANDS.length];
     }
@@ -327,7 +342,8 @@ public final class Dsp {
         for (Channel c : m.ch) {
             double[] s = seg(h, c.p - pre, WL);
             c.E = energy(s);
-            c.n = normalize(spectrum(s, fs));
+            c.rawDb = spectrum(s, fs);
+            c.n = normalize(c.rawDb);
             double nz = energy(seg(h, c.p + (int) Math.round(0.45 * fs), WL));
             c.snr = 10 * Math.log10(c.E / Math.max(nz, 1e-30));
             double he = 0;
@@ -338,6 +354,26 @@ public final class Dsp {
         for (float v : rec) clip = Math.max(clip, Math.abs(v));
         m.clip = clip;
         return m;
+    }
+
+    /** dB 곡선을 oct 옥타브 폭으로 평활 (FR 간격은 1/24옥타브) */
+    public static double[] smooth(double[] db, double oct) {
+        int h = (int) Math.round(oct * 12);
+        double[] o = new double[NF];
+        for (int i = 0; i < NF; i++) {
+            double s = 0; int c = 0;
+            for (int j = Math.max(0, i - h); j <= Math.min(NF - 1, i + h); j++) { s += db[j]; c++; }
+            o[i] = s / c;
+        }
+        return o;
+    }
+
+    static double median(List<Double> v) {
+        List<Double> s = new ArrayList<>(v);
+        java.util.Collections.sort(s);
+        int n = s.size();
+        if (n == 0) return 0;
+        return n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2;
     }
 
     /** 여러 위치에서 잰 측정을 평균 내고 점수를 매긴다 */
@@ -352,23 +388,36 @@ public final class Dsp {
         Result res = new Result();
         res.lr = first.lr;
         res.count = M;
+        res.pref = p;
         res.ch = new Channel[nc];
         for (int c = 0; c < nc; c++) {
             Channel a = new Channel(first.ch[c].name, 0, 0);
-            double[] pw = new double[NF];
+            double[] pw = new double[NF], pr = new double[NF];
             a.snr = Double.MAX_VALUE;
             for (Meas m : ms) {
                 Channel x = m.ch[c];
-                for (int i = 0; i < NF; i++) pw[i] += Math.pow(10, x.n[i] / 10);
+                for (int i = 0; i < NF; i++) {
+                    pw[i] += Math.pow(10, x.n[i] / 10);
+                    pr[i] += Math.pow(10, x.rawDb[i] / 10);
+                }
                 a.E += x.E / M;
                 a.thd += x.thd / M;
                 a.snr = Math.min(a.snr, x.snr);
             }
             a.n = new double[NF];
-            for (int i = 0; i < NF; i++) a.n[i] = 10 * Math.log10(pw[i] / M);
+            a.rawDb = new double[NF];
+            for (int i = 0; i < NF; i++) { a.n[i] = 10 * Math.log10(pw[i] / M); a.rawDb[i] = 10 * Math.log10(pr[i] / M); }
             res.ch[c] = a;
         }
         for (Meas m : ms) res.clip = Math.max(res.clip, m.clip);
+
+        // 위치 간 편차폭(첫 채널 기준)
+        res.spread = new double[NF];
+        if (M > 1) for (int i = 0; i < NF; i++) {
+            double lo = 1e9, hi = -1e9;
+            for (Meas m : ms) { lo = Math.min(lo, m.ch[0].n[i]); hi = Math.max(hi, m.ch[0].n[i]); }
+            res.spread[i] = hi - lo;
+        }
 
         res.avg = new double[NF];
         double[] dev = new double[NF];
@@ -386,14 +435,23 @@ public final class Dsp {
             for (Channel c : res.ch) c.n[i] -= sh;
             dev[i] = res.avg[i] - target(FR[i], p);
         }
+        res.dev = dev;
         double s = 0, cnt = 0;
         for (int i = 0; i < NF; i++) if (FR[i] >= 50 && FR[i] <= 12000) { double w = weight(FR[i], p); s += w * dev[i] * dev[i]; cnt += w; }
         res.rms = Math.sqrt(s / cnt);
+
+        // 저음 한계: 좁은 골 하나가 아니라, 1/3옥타브 평활 곡선이 목표보다 6dB 넘게
+        // 낮아진 상태가 그 아래로 1/3옥타브 이상 이어지는 지점
+        double[] devS = smooth(dev, 1 / 3.0);
         res.fb = 20;
         for (int i = NF - 1; i >= 0; i--) {
             if (FR[i] > 100) continue;
-            if (dev[i] < -6) { res.fb = FR[i]; break; }
+            if (devS[i] >= -6) continue;
+            boolean sustained = true;
+            for (int j = i; j >= Math.max(0, i - 8); j--) if (devS[j] >= -6) { sustained = false; break; }
+            if (sustained) { res.fb = FR[i]; break; }
         }
+
         res.thd = 0; res.snr = Double.MAX_VALUE;
         for (Channel c : res.ch) { res.thd = Math.max(res.thd, c.thd); res.snr = Math.min(res.snr, c.snr); }
         res.tone = clamp(100 - (res.rms - 2) * 12);
@@ -415,25 +473,134 @@ public final class Dsp {
         } else {
             res.total = (0.5 * res.tone + 0.3 * wb * res.bass + 0.2 * wc * res.clar) / (0.5 + 0.3 * wb + 0.2 * wc);
         }
-        // 목표에서 크게 벗어난 구간
-        double rf = 0, rv = 0; boolean run = false;
-        for (int i = 0; i < NF; i++) {
-            double f = FR[i], v = dev[i];
-            boolean bad = f >= 40 && f <= 12000 && (v > 5 || v < -6);
-            if (bad) {
-                if (!run || Math.signum(v) != Math.signum(rv)) {
-                    if (run) res.issues.add(new Issue(rf, rv));
-                    run = true; rf = f; rv = v;
-                } else if (Math.abs(v) > Math.abs(rv)) { rf = f; rv = v; }
-            } else if (run) { res.issues.add(new Issue(rf, rv)); run = false; }
+
+        // 목표에서 크게 벗어난 구간(범위, 폭, 위치 의존성 포함)
+        int start = -1; double rf = 0, rv = 0;
+        for (int i = 0; i <= NF; i++) {
+            double f = i < NF ? FR[i] : 0, v = i < NF ? dev[i] : 0;
+            boolean bad = i < NF && f >= 40 && f <= 12000 && (v > 5 || v < -6);
+            boolean same = bad && start >= 0 && Math.signum(v) == Math.signum(rv);
+            if (start >= 0 && !same) {
+                double sp = 0;
+                for (int j = start; j < i; j++) sp += res.spread[j];
+                sp /= (i - start);
+                res.issues.add(new Issue(rf, rv, FR[start], FR[i - 1], M > 1 && sp > 4));
+                start = -1;
+            }
+            if (bad && start < 0) { start = i; rf = f; rv = v; }
+            else if (bad && Math.abs(v) > Math.abs(rv)) { rf = f; rv = v; }
         }
-        if (run) res.issues.add(new Issue(rf, rv));
+
+        // 9밴드 제안: 대역 안의 중앙값을 써서 좁은 골·봉우리에 휘둘리지 않게 하고,
+        // 올리기는 +3dB까지만 (꺼진 골은 EQ로 잘 메워지지 않음)
         for (int b = 0; b < EQ_BANDS.length; b++) {
-            double t = 0; int n = 0;
+            List<Double> v = new ArrayList<>();
             for (int i = 0; i < NF; i++)
-                if (FR[i] >= EQ_BANDS[b] / Math.sqrt(2) && FR[i] <= EQ_BANDS[b] * Math.sqrt(2)) { t += dev[i]; n++; }
-            res.eqGain[b] = (int) Math.max(-6, Math.min(6, -Math.round(t / n)));
+                if (FR[i] >= EQ_BANDS[b] / Math.sqrt(2) && FR[i] <= EQ_BANDS[b] * Math.sqrt(2)) v.add(dev[i]);
+            res.eqGain[b] = (int) Math.max(-6, Math.min(3, -Math.round(median(v))));
         }
         return res;
+    }
+
+    // ---------- 3밴드(저음·중음·고음) 노브 추천 ----------
+
+    public static final String[] KNOBS = {"저음", "중음", "고음"};
+
+    /** 학습 전 쓰는 일반적인 톤 컨트롤 모양(1단계당 dB) */
+    public static double[] genericKnob(int k) {
+        double[] s = new double[NF];
+        for (int i = 0; i < NF; i++) {
+            double f = FR[i];
+            if (k == 0) s[i] = 1 / (1 + (f / 120) * (f / 120));
+            else if (k == 1) s[i] = bell(f, 800, 1.0);
+            else s[i] = 1 / (1 + (6000 / f) * (6000 / f));
+        }
+        return s;
+    }
+
+    /** 노브 추천 결과 */
+    public static final class KnobFit {
+        public final int[] steps = new int[3];
+        public double rmsBefore, rmsAfter;
+    }
+
+    /**
+     * 각 노브의 모양(shapes[k], 1단계당 dB)을 써서, 목표와의 차이가 가장 작아지는
+     * 노브 단계를 최소자승으로 구한다. 좁은 골·위치 편차가 큰 대역은 덜 반영한다.
+     */
+    public static KnobFit fitKnobs(Result r, double[][] shapes, int maxStep) {
+        double[] dev = smooth(r.dev, 1 / 3.0);
+        int K = 3, V = K + 1;
+        double[][] A = new double[V][V];
+        double[] B = new double[V];
+        double[] w = new double[NF];
+        for (int i = 0; i < NF; i++) {
+            double f = FR[i];
+            if (f < 40 || f > 12000) continue;
+            w[i] = weight(f, r.pref) / (1 + r.spread[i] / 3) * (f > 10000 ? 0.3 : 1);
+            double[] x = {shapes[0][i], shapes[1][i], shapes[2][i], 1};
+            for (int a = 0; a < V; a++) {
+                B[a] += w[i] * x[a] * (-dev[i]);
+                for (int b = 0; b < V; b++) A[a][b] += w[i] * x[a] * x[b];
+            }
+        }
+        for (int a = 0; a < V; a++) A[a][a] += 1e-6 + (a < K ? 0.02 * A[a][a] : 0);
+        double[] g = solve(A, B);
+        KnobFit kf = new KnobFit();
+        for (int k = 0; k < K; k++) kf.steps[k] = (int) Math.max(-maxStep, Math.min(maxStep, Math.round(g[k])));
+        // 반올림한 값으로 전후 편차 계산 (전체 레벨은 다시 맞춤)
+        double sb = 0, sa = 0, sw = 0, mean = 0;
+        double[] after = new double[NF];
+        for (int i = 0; i < NF; i++) {
+            after[i] = r.dev[i];
+            for (int k = 0; k < K; k++) after[i] += kf.steps[k] * shapes[k][i];
+            if (w[i] > 0) { mean += w[i] * after[i]; sw += w[i]; }
+        }
+        mean /= sw;
+        double cw = 0;
+        for (int i = 0; i < NF; i++) {
+            double f = FR[i];
+            if (f < 50 || f > 12000) continue;
+            double ww = weight(f, r.pref);
+            sb += ww * r.dev[i] * r.dev[i];
+            sa += ww * (after[i] - mean) * (after[i] - mean);
+            cw += ww;
+        }
+        kf.rmsBefore = Math.sqrt(sb / cw);
+        kf.rmsAfter = Math.sqrt(sa / cw);
+        return kf;
+    }
+
+    static double[] solve(double[][] A0, double[] b0) {
+        int n = b0.length;
+        double[][] A = new double[n][];
+        for (int i = 0; i < n; i++) A[i] = A0[i].clone();
+        double[] b = b0.clone();
+        for (int c = 0; c < n; c++) {
+            int piv = c;
+            for (int r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+            double[] t = A[c]; A[c] = A[piv]; A[piv] = t;
+            double tb = b[c]; b[c] = b[piv]; b[piv] = tb;
+            if (Math.abs(A[c][c]) < 1e-12) continue;
+            for (int r = c + 1; r < n; r++) {
+                double f = A[r][c] / A[c][c];
+                for (int k = c; k < n; k++) A[r][k] -= f * A[c][k];
+                b[r] -= f * b[c];
+            }
+        }
+        double[] x = new double[n];
+        for (int r = n - 1; r >= 0; r--) {
+            double s = b[r];
+            for (int k = r + 1; k < n; k++) s -= A[r][k] * x[k];
+            x[r] = Math.abs(A[r][r]) < 1e-12 ? 0 : s / A[r][r];
+        }
+        return x;
+    }
+
+    /** 노브 학습: 기준 측정과 노브를 steps 단계 올린 측정의 차이로 1단계당 모양을 구한다 */
+    public static double[] learnKnob(double[] baseRaw, double[] knobRaw, int steps) {
+        double[] d = new double[NF];
+        for (int i = 0; i < NF; i++) d[i] = (knobRaw[i] - baseRaw[i]) / steps;
+        return smooth(d, 1 / 3.0);
     }
 }
