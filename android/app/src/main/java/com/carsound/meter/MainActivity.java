@@ -40,7 +40,15 @@ public class MainActivity extends Activity {
     private LinearLayout resultCard, diagList;
     private FrView chart;
     private EqView eqView;
-    private TextView score, grade, count, status, legend, details, eqNote, info, diagStatus, shareNote, prefHint;
+    private TextView score, grade, count, status, legend, eqNote, info, diagStatus, shareNote, prefHint;
+    private LinearLayout detailBox, eq3Box, eq9Box, knobRow;
+    private TextView knobNote, learnText, learnStatus;
+    private Button eqTab3, eqTab9, learnBtn, learnClear;
+    private int learnStep = 0;
+    private double[] learnBase;
+    private double[][] learnTmp = new double[3][];
+    private final double[][] knobShape = new double[3][];
+    private Dsp.KnobFit lastKnob;
     private Button run, reset, diagBtn, shareBtn;
     private RadioButton modeLr;
     private final List<Dsp.Meas> session = new ArrayList<>();
@@ -63,6 +71,7 @@ public class MainActivity extends Activity {
         store = getSharedPreferences("taste", MODE_PRIVATE);
         loadPref();
         AudioEngine.chosenSource = store.getInt("source", -1);
+        loadKnobs();
         getWindow().setStatusBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
 
@@ -79,7 +88,7 @@ public class MainActivity extends Activity {
         LinearLayout s1 = card(root);
         s1.addView(stepHeader("1", "입력 진단"));
         s1.addView(text("휴대폰이 쓸 수 있는 녹음 방식 5가지로 같은 신호를 녹음해, 가장 정확한 방식을 자동으로 고릅니다. 처음 한 번만 하면 됩니다.", 14, MUT, false));
-        s1.addView(text("차에서 평소 듣는 볼륨으로, 휴대폰을 운전석 귀 높이에 두고 움직이지 마세요.", 14, MUT, false));
+        s1.addView(text("차에서 평소 듣는 볼륨으로, 휴대폰을 운전석 귀 높이에 두고 움직이지 마세요. 녹음마다 처음 3초 동안 작은 '쉬' 소리로 스피커 연결을 깨웁니다.", 14, MUT, false));
         diagStatus = text("", 15, INK, true);
         diagStatus.setPadding(0, px(10), 0, 0);
         s1.addView(diagStatus);
@@ -136,6 +145,7 @@ public class MainActivity extends Activity {
         count = text("2단계 측정을 하면 표시됩니다", 13, MUT, false);
         col.addView(grade);
         col.addView(count);
+        col.addView(text("100점 만점 · 목표 곡선에 가깝고 찌그러짐이 적을수록 높습니다", 12, MUT, false));
         row.addView(col);
         resultCard.addView(row);
         chart = new FrView(this);
@@ -147,21 +157,11 @@ public class MainActivity extends Activity {
 
         LinearLayout c4 = card(root);
         c4.addView(text("세부 결과", 18, INK, true));
-        details = text("측정 후 표시됩니다.", 15, INK, false);
-        details.setLineSpacing(0, 1.3f);
-        c4.addView(details);
+        detailBox = new LinearLayout(this);
+        detailBox.setOrientation(LinearLayout.VERTICAL);
+        c4.addView(detailBox);
 
-        LinearLayout c5 = card(root);
-        c5.addView(text("EQ 조정 제안", 18, INK, true));
-        c5.addView(text("차량 이퀄라이저에서 각 대역을 막대만큼 올리거나 내려 보세요. 대역 이름이 조금 달라도 가장 가까운 값을 쓰면 됩니다.", 13, MUT, false));
-        eqView = new EqView(this);
-        LinearLayout.LayoutParams eqLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        eqLp.topMargin = px(12);
-        c5.addView(eqView, eqLp);
-        eqNote = text("", 13, MUT, false);
-        eqNote.setLineSpacing(0, 1.3f);
-        eqNote.setPadding(0, px(6), 0, 0);
-        c5.addView(eqNote);
+        buildEqCard(root);
 
         LinearLayout c8 = card(root);
         c8.addView(text("결과 공유", 18, INK, true));
@@ -201,6 +201,7 @@ public class MainActivity extends Activity {
         updateSteps();
         updateInfo(false);
         applyPrefToUi();
+        updateLearnUi();
         clearResult("");
     }
 
@@ -229,12 +230,12 @@ public class MainActivity extends Activity {
         if (done) {
             diagStatus.setText("✓ 완료 · '" + AudioEngine.sourceName(AudioEngine.chosenSource) + "' 방식으로 측정합니다");
             diagStatus.setTextColor(OK);
-            diagBtn.setText("다시 진단 (약 1분)");
+            diagBtn.setText("다시 진단 (약 1분 30초)");
             run.setText("측정 시작");
         } else {
             diagStatus.setText("아직 진단하지 않았습니다. 측정 전에 먼저 진단해 주세요.");
             diagStatus.setTextColor(ACC);
-            diagBtn.setText("입력 진단 시작 (약 1분)");
+            diagBtn.setText("입력 진단 시작 (약 1분 30초)");
             run.setText("진단 없이 측정");
         }
         styleButton(diagBtn, !done);
@@ -302,7 +303,7 @@ public class MainActivity extends Activity {
                     boolean agc = d.linErr > 1.5;
                     double sc = (d.snr < 20 ? -1000 : 0) + (agc ? -100 : 0) - d.linErr * 5 + d.lowRel + 0.5 * d.highRel + Math.min(d.snr, 50) * 0.1;
                     items.add(new DiagItem(srcs[i], d));
-                    if (sc > bestScore) { bestScore = sc; best = srcs[i]; }
+                    if (d.snr >= 20 && sc > bestScore) { bestScore = sc; best = srcs[i]; }
                     Thread.sleep(500);
                 }
                 saveDiag(items);
@@ -319,7 +320,7 @@ public class MainActivity extends Activity {
                     }
                     setBusy(false);
                     updateSteps();
-                    if (chosen < 0) setDiagStatus("진단 실패: 쓸 수 있는 입력 방식이 없습니다.", ACC);
+                    if (chosen < 0) setDiagStatus("진단 실패: 테스트 신호가 제대로 녹음되지 않았습니다. 블루투스 '미디어 오디오' 연결과 볼륨을 확인하고 다시 진단해 주세요.", ACC);
                     updateInfo(true);
                 });
             } catch (Throwable e) {
@@ -371,7 +372,7 @@ public class MainActivity extends Activity {
         diagList.removeAllViews();
         if (items.isEmpty()) return;
         double bestLow = -1e9, bestHigh = -1e9;
-        for (DiagItem it : items) if (it.d != null) { bestLow = Math.max(bestLow, it.d.lowRel); bestHigh = Math.max(bestHigh, it.d.highRel); }
+        for (DiagItem it : items) if (it.d != null && it.d.snr >= 20) { bestLow = Math.max(bestLow, it.d.lowRel); bestHigh = Math.max(bestHigh, it.d.highRel); }
         for (DiagItem it : items) {
             boolean rec = it.src == chosen;
             LinearLayout box = new LinearLayout(this);
@@ -391,6 +392,8 @@ public class MainActivity extends Activity {
             box.addView(head);
             if (it.d == null) {
                 box.addView(text("이 기기에서 쓸 수 없는 방식", 13, MUT, false));
+            } else if (it.d.snr < 20) {
+                box.addView(metric("결과", "무효", "신호가 제대로 녹음되지 않음", ACC));
             } else {
                 boolean agc = it.d.linErr > 1.5;
                 box.addView(metric("자동 음량 조절", agc ? "있음" : "없음", String.format(Locale.US, "오차 %.1fdB", it.d.linErr), agc ? ACC : OK));
@@ -447,6 +450,416 @@ public class MainActivity extends Activity {
 
     // ---------- 측정 ----------
 
+    // ---------- 세부 결과 ----------
+
+    static final String[] LV = {"아주 좋음", "좋음", "보통", "아쉬움"};
+
+    static int lvColor(int l) { return l <= 1 ? OK : l == 2 ? WARN : ACC; }
+
+    private void renderDetails(Dsp.Result r) {
+        detailBox.removeAllViews();
+        List<String> warns = new ArrayList<>();
+        if (AudioEngine.lastOutputIsPhoneSpeaker) warns.add("소리가 휴대폰 스피커로 나왔습니다. 차량에 연결한 뒤 다시 측정하세요.");
+        if (AudioEngine.lastInputNotBuiltin) warns.add("내장 마이크가 아닌 다른 입력이 쓰였습니다. 측정 환경을 확인하세요.");
+        if (r.clip > 0.98) warns.add("마이크 입력이 넘쳤습니다. 볼륨을 조금 낮추고 다시 재세요.");
+        if (r.snr < 20) warns.add("신호가 소음에 묻혀 결과를 믿기 어렵습니다. 볼륨을 올리거나 시동을 끄고 다시 재세요.");
+        for (String w : warns) detailBox.addView(banner("⚠ " + w));
+
+        int tl = r.rms <= 3 ? 0 : r.rms <= 4.5 ? 1 : r.rms <= 6 ? 2 : 3;
+        addMetric("음색 균형", LV[tl], lvColor(tl), r.tone, "목표 곡선과 평균 ±" + f1(r.rms) + "dB 차이",
+                "저음·중음·고음의 비율이 목표 곡선과 얼마나 비슷한지 봅니다. ±3dB 이내면 아주 좋고, ±6dB를 넘으면 특정 소리가 튀거나 묻혀 들립니다.");
+        int bl = r.fb <= 40 ? 0 : r.fb <= 60 ? 1 : r.fb <= 90 ? 2 : 3;
+        addMetric("저음 깊이", LV[bl], lvColor(bl), r.bass,
+                r.fb <= 20 ? "가장 낮은 저음(20Hz)까지 힘 있게 나옵니다" : "약 " + fmtF(r.fb) + " 아래부터 저음이 약해집니다",
+                "얼마나 낮은 저음까지 충분히 나오는지 봅니다. 40Hz 아래까지 나오면 아주 깊고, 80Hz 위에서 약해지면 저음이 얕게 느껴집니다.");
+        int dl = r.thd < 1 ? 0 : r.thd < 2 ? 1 : r.thd < 3 ? 2 : 3;
+        addMetric("깨끗함", LV[dl], lvColor(dl), r.clar, "찌그러짐(왜곡) " + f1(r.thd) + "%",
+                "지금 볼륨에서 스피커나 앰프가 소리를 찌그러뜨리는 정도입니다. 1% 미만이면 귀로 느끼기 어렵고, 3%를 넘으면 거칠게 들립니다.");
+        if (r.lr) {
+            double ab = Math.abs(r.bal), ad = Math.abs(r.dly);
+            int ll = (ab <= 1 && ad <= 1) ? 0 : (ab <= 2 && ad <= 2) ? 1 : ab <= 4 ? 2 : 3;
+            addMetric("좌우 밸런스", LV[ll], lvColor(ll), r.balScore,
+                    (r.bal > 0 ? "왼쪽" : "오른쪽") + "이 " + f1(ab) + "dB 크고, " + (r.dly > 0 ? "왼쪽" : "오른쪽") + " 소리가 " + f1(ad)
+                            + "ms 먼저 도착 (거리 차 약 " + Math.round(ad * 34.3) + "cm)",
+                    "운전석은 왼쪽 스피커에 가까워 소리가 왼쪽으로 쏠리기 쉽습니다. 음량 차 1dB, 시간 차 1ms 이하가 이상적입니다."
+                            + (ad > 1 ? " 헤드유닛에 청취 위치(운전석 중심) 설정이 있다면 켜 보세요." : ""));
+        }
+        int sl = r.snr >= 40 ? 0 : r.snr >= 30 ? 1 : r.snr >= 20 ? 2 : 3;
+        String[] SN = {"높음", "충분", "보통", "낮음"};
+        addMetric("측정 신뢰도", SN[sl], lvColor(sl), -1, "테스트 신호가 주변 소음보다 " + Math.round(r.snr) + "dB 큼",
+                "점수가 아니라 이번 측정을 얼마나 믿을 수 있는지입니다. 30dB 이상이면 충분하고, 20dB 미만이면 다시 측정하세요.");
+
+        TextView h = text("눈에 띄는 구간", 16, INK, true);
+        h.setPadding(0, px(16), 0, px(2));
+        detailBox.addView(h);
+        if (r.issues.isEmpty()) detailBox.addView(text("목표 곡선에서 크게 벗어난 구간이 없습니다.", 14, MUT, false));
+        int k = 0;
+        for (Dsp.Issue x : r.issues) {
+            if (k++ >= 6) break;
+            addIssue(x);
+        }
+        TextView g = text("그래프에서 빨간 선이 점선(목표)보다 위에 있으면 그 소리가 크게, 아래에 있으면 작게 들린다는 뜻입니다.", 12, MUT, false);
+        g.setPadding(0, px(10), 0, 0);
+        detailBox.addView(g);
+    }
+
+    private void addMetric(String title, String verdict, int color, double score, String value, String meaning) {
+        if (detailBox.getChildCount() > 0) {
+            View d = new View(this);
+            d.setBackgroundColor(LINE);
+            detailBox.addView(d, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, px(1))));
+        }
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, px(12), 0, px(12));
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text(title, 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(pill(verdict, color));
+        box.addView(head);
+        TextView v = text(value, 15, INK, false);
+        v.setPadding(0, px(6), 0, 0);
+        box.addView(v);
+        if (score >= 0) box.addView(meter(score));
+        TextView m = text(meaning, 13, MUT, false);
+        m.setLineSpacing(0, 1.25f);
+        m.setPadding(0, px(6), 0, 0);
+        box.addView(m);
+        detailBox.addView(box);
+    }
+
+    private View meter(double score) {
+        int sc = (int) Math.round(score);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, px(8), 0, 0);
+        LinearLayout track = new LinearLayout(this);
+        track.setOrientation(LinearLayout.HORIZONTAL);
+        GradientDrawable tg = new GradientDrawable();
+        tg.setCornerRadius(px(4));
+        tg.setColor(LINE);
+        track.setBackground(tg);
+        View fill = new View(this);
+        GradientDrawable fg = new GradientDrawable();
+        fg.setCornerRadius(px(4));
+        fg.setColor(sc >= 70 ? OK : sc >= 50 ? WARN : ACC);
+        fill.setBackground(fg);
+        track.addView(fill, new LinearLayout.LayoutParams(0, px(8), (float) Math.max(sc, 0.5)));
+        track.addView(new View(this), new LinearLayout.LayoutParams(0, px(8), (float) Math.max(100 - sc, 0.5)));
+        row.addView(track, new LinearLayout.LayoutParams(0, px(8), 1));
+        TextView t = text("100점 중 " + sc + "점", 12, MUT, false);
+        t.setPadding(px(10), 0, 0, 0);
+        row.addView(t);
+        return row;
+    }
+
+    private TextView banner(String s) {
+        TextView t = text(s, 14, ACC, true);
+        t.setPadding(px(12), px(10), px(12), px(10));
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(px(10));
+        g.setColor(0xFFFFF1EF);
+        t.setBackground(g);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = px(8);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    private void addIssue(Dsp.Issue x) {
+        boolean up = x.v > 0;
+        String range = Math.round(x.fLo) == Math.round(x.fHi) ? fmtF(x.f) : fmtF(x.fLo) + "~" + fmtF(x.fHi);
+        String title = range + " · 목표보다 " + (up ? "+" : "") + Math.round(x.v) + "dB " + (up ? "큼" : "작음");
+        String knob = x.f < 300 ? "저음" : x.f < 2000 ? "중음" : "고음";
+        String why;
+        if (x.narrow && !up) why = "좁게 꺼진 골입니다. 스피커끼리 소리가 상쇄되거나 실내 공진 때문에 생기며, EQ로 올려도 잘 메워지지 않습니다. 귀로는 크게 느껴지지 않는 경우가 많아요.";
+        else if (x.narrow) why = "좁게 튀는 공진입니다. 특정 음에서 소리가 붕 뜨거나 울릴 수 있어요. " + knob + "을 조금 내려 보세요.";
+        else if (up) why = x.f < 300 ? "저음이 웅웅거리거나 둔탁할 수 있어요. 저음을 조금 내려 보세요."
+                : x.f < 2000 ? "소리가 통 안에서 울리는 듯 답답할 수 있어요. 중음을 조금 내려 보세요."
+                : "소리가 쏘거나 귀가 피곤할 수 있어요. 고음을 조금 내려 보세요.";
+        else why = x.f < 300 ? "저음이 빈약하게 느껴질 수 있어요." : x.f < 4000 ? "목소리·악기가 멀고 흐릿하게 들릴 수 있어요." : "소리가 둔하고 답답하게 들릴 수 있어요.";
+        if (x.posDep) why += " 앉은 위치에 따라 크게 달라지는 구간입니다.";
+        if (x.f >= 10000) why += " 단, 10kHz 이상은 휴대폰 마이크 특성일 수 있어 참고만 하세요.";
+        if (x.f < 46) why += " 40Hz 근처 값은 측정 시작 부분이 잘려 생긴 것일 수도 있습니다.";
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, px(10), 0, 0);
+        View dot = new View(this);
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(up ? ACC : EqView.UP);
+        dot.setBackground(d);
+        LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(px(10), px(10));
+        dl.rightMargin = px(10);
+        dl.topMargin = px(5);
+        row.addView(dot, dl);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.addView(text(title, 14, INK, true));
+        TextView w = text(why, 13, MUT, false);
+        w.setLineSpacing(0, 1.25f);
+        col.addView(w);
+        row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        detailBox.addView(row);
+    }
+
+    // ---------- EQ 제안 (3밴드 / 9밴드) ----------
+
+    private void buildEqCard(LinearLayout root) {
+        LinearLayout c = card(root);
+        c.addView(text("EQ 조정 제안", 18, INK, true));
+        c.addView(text("내 차 이퀄라이저 형태를 고르세요.", 13, MUT, false));
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setPadding(0, px(8), 0, 0);
+        eqTab3 = button("3밴드 (저·중·고)", false);
+        eqTab9 = button("9밴드 그래픽", false);
+        eqTab3.setTextSize(14);
+        eqTab9.setTextSize(14);
+        eqTab3.setOnClickListener(v -> setEqMode(true));
+        eqTab9.setOnClickListener(v -> setEqMode(false));
+        LinearLayout.LayoutParams t1 = new LinearLayout.LayoutParams(0, px(44), 1);
+        t1.rightMargin = px(6);
+        tabs.addView(eqTab3, t1);
+        tabs.addView(eqTab9, new LinearLayout.LayoutParams(0, px(44), 1));
+        c.addView(tabs);
+
+        eq3Box = new LinearLayout(this);
+        eq3Box.setOrientation(LinearLayout.VERTICAL);
+        knobRow = new LinearLayout(this);
+        knobRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams kl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        kl.topMargin = px(12);
+        eq3Box.addView(knobRow, kl);
+        knobNote = text("", 13, MUT, false);
+        knobNote.setLineSpacing(0, 1.25f);
+        knobNote.setPadding(0, px(8), 0, 0);
+        eq3Box.addView(knobNote);
+        TextView lt = text("내 차 노브 학습 (더 정확하게)", 16, INK, true);
+        lt.setPadding(0, px(18), 0, px(2));
+        eq3Box.addView(lt);
+        learnText = text("", 13, MUT, false);
+        learnText.setLineSpacing(0, 1.25f);
+        eq3Box.addView(learnText);
+        learnBtn = button("", false);
+        learnBtn.setOnClickListener(v -> onLearn());
+        eq3Box.addView(learnBtn, lp(px(48), px(10)));
+        learnClear = button("", false);
+        learnClear.setTextSize(13);
+        learnClear.setOnClickListener(v -> onLearnClear());
+        eq3Box.addView(learnClear, lp(px(40), px(6)));
+        learnStatus = text("", 13, OK, true);
+        learnStatus.setPadding(0, px(8), 0, 0);
+        eq3Box.addView(learnStatus);
+        c.addView(eq3Box);
+
+        eq9Box = new LinearLayout(this);
+        eq9Box.setOrientation(LinearLayout.VERTICAL);
+        eq9Box.addView(text("각 대역을 막대만큼 올리거나 내려 보세요. 대역 이름이 조금 달라도 가장 가까운 값을 쓰면 됩니다.", 13, MUT, false));
+        eqView = new EqView(this);
+        LinearLayout.LayoutParams eqLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        eqLp.topMargin = px(12);
+        eq9Box.addView(eqView, eqLp);
+        eqNote = text("", 13, MUT, false);
+        eqNote.setLineSpacing(0, 1.3f);
+        eqNote.setPadding(0, px(6), 0, 0);
+        eq9Box.addView(eqNote);
+        c.addView(eq9Box);
+        setEqMode(store.getBoolean("eq3", true));
+    }
+
+    private void setEqMode(boolean three) {
+        store.edit().putBoolean("eq3", three).apply();
+        eq3Box.setVisibility(three ? View.VISIBLE : View.GONE);
+        eq9Box.setVisibility(three ? View.GONE : View.VISIBLE);
+        for (int i = 0; i < 2; i++) {
+            Button b = i == 0 ? eqTab3 : eqTab9;
+            boolean on = (i == 0) == three;
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(px(10));
+            g.setColor(on ? INK : CARD);
+            g.setStroke(px(1), on ? INK : LINE);
+            b.setBackground(g);
+            b.setTextColor(on ? 0xFFFFFFFF : INK);
+        }
+    }
+
+    private boolean learned() {
+        return knobShape[0] != null && knobShape[1] != null && knobShape[2] != null;
+    }
+
+    private double[][] knobShapes() {
+        if (learned()) return knobShape;
+        return new double[][]{Dsp.genericKnob(0), Dsp.genericKnob(1), Dsp.genericKnob(2)};
+    }
+
+    private void renderKnobs(Dsp.Result r) {
+        knobRow.removeAllViews();
+        Dsp.KnobFit kf = r == null ? null : Dsp.fitKnobs(r, knobShapes(), learned() ? 10 : 6);
+        lastKnob = kf;
+        for (int k = 0; k < 3; k++) {
+            int st = kf == null ? 0 : kf.steps[k];
+            LinearLayout b = new LinearLayout(this);
+            b.setOrientation(LinearLayout.VERTICAL);
+            b.setGravity(Gravity.CENTER_HORIZONTAL);
+            b.setPadding(px(6), px(12), px(6), px(12));
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(px(12));
+            g.setColor(kf == null || st == 0 ? BG : st > 0 ? 0xFFEAF0FB : 0xFFFFF1EF);
+            g.setStroke(px(1), LINE);
+            b.setBackground(g);
+            TextView name = text(Dsp.KNOBS[k], 14, MUT, true);
+            name.setGravity(Gravity.CENTER);
+            b.addView(name);
+            TextView v = text(kf == null ? "–" : signed(st), 34, kf == null ? MUT : st > 0 ? EqView.UP : st < 0 ? EqView.DOWN : INK, true);
+            v.setGravity(Gravity.CENTER);
+            b.addView(v);
+            TextView a = text(kf == null ? "측정 후 표시" : st > 0 ? st + "단계 올리기" : st < 0 ? (-st) + "단계 내리기" : "그대로", 13, MUT, false);
+            a.setGravity(Gravity.CENTER);
+            b.addView(a);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            if (k < 2) lp.rightMargin = px(8);
+            knobRow.addView(b, lp);
+        }
+        if (kf == null) knobNote.setText("측정하면 저음·중음·고음 노브를 몇 단계 움직일지 알려드립니다.");
+        else knobNote.setText((learned() ? "학습한 내 차 노브 기준으로 계산했습니다. "
+                : "일반적인 노브 형태로 추정한 값입니다(1단계 ≈ 1dB 가정). 아래 노브 학습을 하면 내 차에 정확히 맞춰집니다. ")
+                + "예상 효과: 목표와의 차이 ±" + f1(kf.rmsBefore) + "dB → ±" + f1(kf.rmsAfter) + "dB");
+    }
+
+    // ---------- 노브 학습 ----------
+
+    private void updateLearnUi() {
+        String[] texts = {
+                "저음·중음·고음 노브를 한 단계 올렸을 때 실제로 어떤 소리가 얼마나 바뀌는지 측정해, 추천을 내 차에 맞춥니다. 측정 4번(약 1분), 휴대폰을 한 자리에 고정해 두세요.",
+                "차량 EQ의 저음·중음·고음을 모두 0으로 맞추고 버튼을 누르세요.",
+                "저음만 +5로 올리고 버튼을 누르세요.",
+                "저음을 0으로 되돌리고, 중음만 +5로 올린 뒤 누르세요.",
+                "중음을 0으로 되돌리고, 고음만 +5로 올린 뒤 누르세요."};
+        String[] btn = {"노브 학습 시작", "① 기준 측정 (모두 0)", "② 저음 +5 측정", "③ 중음 +5 측정", "④ 고음 +5 측정"};
+        learnText.setText(texts[learnStep]);
+        learnBtn.setText(btn[learnStep]);
+        styleButton(learnBtn, learnStep > 0);
+        if (learnStep > 0) {
+            learnClear.setText("학습 취소");
+            learnClear.setVisibility(View.VISIBLE);
+        } else if (learned()) {
+            learnClear.setText("학습 결과 지우기 (일반형으로 되돌리기)");
+            learnClear.setVisibility(View.VISIBLE);
+        } else {
+            learnClear.setVisibility(View.GONE);
+        }
+        if (learnStep == 0 && learned() && learnStatus.getText().length() == 0) setLearnStatus("✓ 학습 완료 · 추천값이 내 차 노브 기준으로 계산됩니다", OK);
+    }
+
+    private void setLearnStatus(String s, int color) {
+        learnStatus.setText(s);
+        learnStatus.setTextColor(color);
+    }
+
+    private void onLearn() {
+        if (busy) return;
+        if (learnStep == 0) {
+            learnStep = 1;
+            learnTmp = new double[3][];
+            setLearnStatus("", OK);
+            updateLearnUi();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 3);
+            return;
+        }
+        startLearnMeasure();
+    }
+
+    private void onLearnClear() {
+        if (busy) return;
+        if (learnStep > 0) {
+            learnStep = 0;
+            setLearnStatus("학습을 취소했습니다. 차량 EQ 노브를 원래대로 되돌리세요.", MUT);
+        } else {
+            for (int k = 0; k < 3; k++) { knobShape[k] = null; store.edit().remove("knob" + k).apply(); }
+            setLearnStatus("학습 결과를 지웠습니다. 일반적인 노브 형태로 추천합니다.", MUT);
+            renderKnobs(lastResult);
+        }
+        updateLearnUi();
+    }
+
+    private void startLearnMeasure() {
+        final int step = learnStep;
+        setBusy(true);
+        setLearnStatus("측정 준비 중…", INK);
+        new Thread(() -> {
+            try {
+                float[] rec = AudioEngine.record(this, false, msg -> ui.post(() -> setLearnStatus(msg, INK)));
+                if (rec.length < AudioEngine.FS * 9) throw new IllegalStateException("녹음이 너무 짧습니다.");
+                ui.post(() -> setLearnStatus("분석 중…", INK));
+                Dsp.Meas m = Dsp.measure(rec, AudioEngine.FS, false);
+                ui.post(() -> {
+                    setBusy(false);
+                    if (m.ch[0].snr < 20) {
+                        setLearnStatus("신호가 약해 다시 측정해 주세요 (신뢰도 " + Math.round(m.ch[0].snr) + "dB).", ACC);
+                        return;
+                    }
+                    if (step == 1) {
+                        learnBase = m.ch[0].rawDb;
+                        learnStep = 2;
+                        setLearnStatus("기준 측정 완료 · 다음 단계를 진행하세요.", OK);
+                    } else {
+                        learnTmp[step - 2] = Dsp.learnKnob(learnBase, m.ch[0].rawDb, 5);
+                        if (step < 4) {
+                            learnStep = step + 1;
+                            setLearnStatus(Dsp.KNOBS[step - 2] + " 학습 완료 · 다음 단계를 진행하세요.", OK);
+                        } else {
+                            for (int k = 0; k < 3; k++) knobShape[k] = learnTmp[k];
+                            saveKnobs();
+                            learnStep = 0;
+                            setLearnStatus("✓ 학습 완료! 고음 노브를 0으로 되돌리세요. 이제 추천값이 내 차 노브 기준으로 계산됩니다.", OK);
+                            renderKnobs(lastResult);
+                        }
+                    }
+                    updateLearnUi();
+                });
+            } catch (Throwable e) {
+                String msg = e instanceof OutOfMemoryError ? "메모리가 부족합니다." : String.valueOf(e.getMessage());
+                ui.post(() -> { setBusy(false); setLearnStatus("측정 실패: " + msg, ACC); });
+            }
+        }).start();
+    }
+
+    private void saveKnobs() {
+        SharedPreferences.Editor e = store.edit();
+        for (int k = 0; k < 3; k++) {
+            StringBuilder s = new StringBuilder();
+            for (int i = 0; i < Dsp.NF; i++) {
+                if (i > 0) s.append(',');
+                s.append(String.format(Locale.US, "%.3f", knobShape[k][i]));
+            }
+            e.putString("knob" + k, s.toString());
+        }
+        e.apply();
+    }
+
+    private void loadKnobs() {
+        try {
+            for (int k = 0; k < 3; k++) {
+                String s = store.getString("knob" + k, "");
+                if (s.isEmpty()) { knobShape[k] = null; continue; }
+                String[] f = s.split(",");
+                if (f.length != Dsp.NF) { knobShape[k] = null; continue; }
+                double[] v = new double[Dsp.NF];
+                for (int i = 0; i < Dsp.NF; i++) v[i] = Double.parseDouble(f[i]);
+                knobShape[k] = v;
+            }
+        } catch (RuntimeException e) {
+            for (int k = 0; k < 3; k++) knobShape[k] = null;
+        }
+    }
+
     private void onRun() {
         if (busy) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -459,7 +872,8 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
-        if (ok && code == 2) startDiag();
+        if (ok && code == 3) startLearnMeasure();
+        else if (ok && code == 2) startDiag();
         else if (ok && code == 1) startMeasure();
         else setStatus("마이크 권한이 없어 진행할 수 없습니다. 설정에서 마이크 권한을 허용해 주세요.", true);
     }
@@ -471,6 +885,8 @@ public class MainActivity extends Activity {
         diagBtn.setEnabled(!b);
         run.setAlpha(b ? 0.6f : 1f);
         diagBtn.setAlpha(b ? 0.6f : 1f);
+        learnBtn.setEnabled(!b);
+        learnClear.setEnabled(!b);
         if (b) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
@@ -507,9 +923,11 @@ public class MainActivity extends Activity {
         score.setText("--");
         grade.setText("측정 전");
         count.setText("2단계 측정을 하면 표시됩니다");
-        details.setText("측정 후 표시됩니다.");
+        detailBox.removeAllViews();
+        detailBox.addView(text("2단계 측정을 하면 항목별로 쉽게 풀어서 보여드립니다.", 14, MUT, false));
         eqView.setGains(null);
         eqNote.setText("");
+        renderKnobs(null);
         setStatus(msg, false);
     }
 
@@ -522,6 +940,13 @@ public class MainActivity extends Activity {
         grade.setText(gradeName(t));
         count.setText("측정 위치 " + r.count + "곳 평균 · " + pref.name + " 기준");
 
+        renderDetails(r);
+        eqView.setGains(r.eqGain);
+        setEqNote(r.eqGain);
+        renderKnobs(r);
+    }
+
+    private void oldDetails(Dsp.Result r) {
         StringBuilder s = new StringBuilder();
         s.append(bar("음색 균형", r.tone)).append(bar("저음 확장", r.bass)).append(bar("깨끗함", r.clar));
         if (r.lr) s.append(bar("좌우 밸런스", r.balScore));
@@ -553,10 +978,6 @@ public class MainActivity extends Activity {
         if (notes.isEmpty()) notes.add("목표 곡선에서 크게 벗어난 대역이 없습니다.");
         s.append("\n눈에 띄는 점\n");
         for (String n : notes) s.append(n).append("\n");
-        details.setText(s.toString().trim());
-
-        eqView.setGains(r.eqGain);
-        setEqNote(r.eqGain);
     }
 
     static String gradeName(int t) {
@@ -658,6 +1079,9 @@ public class MainActivity extends Activity {
             s.append(fmtF(Dsp.EQ_BANDS[i])).append(" ").append(signed(r.eqGain[i]));
         }
         s.append("\n");
+        if (lastKnob != null) s.append("3밴드 추천(").append(learned() ? "학습값" : "일반형 추정").append("): 저음 ").append(signed(lastKnob.steps[0]))
+                .append(", 중음 ").append(signed(lastKnob.steps[1])).append(", 고음 ").append(signed(lastKnob.steps[2]))
+                .append(String.format(Locale.US, " (목표와의 차이 ±%.1f → ±%.1fdB)\n", lastKnob.rmsBefore, lastKnob.rmsAfter));
 
         boolean spread = session.size() > 1;
         s.append("\n[주파수 응답] 1/6옥타브 간격, dB (300Hz~3kHz 평균을 목표 곡선에 맞춤)\nHz");
