@@ -49,6 +49,7 @@ public class MainActivity extends Activity {
     private double[][] learnTmp = new double[3][];
     private final double[][] knobShape = new double[3][];
     private Dsp.KnobFit lastKnob;
+    private LinearLayout adviceBox;
     private Button run, reset, diagBtn, shareBtn;
     private RadioButton modeLr;
     private final List<Dsp.Meas> session = new ArrayList<>();
@@ -162,6 +163,13 @@ public class MainActivity extends Activity {
         c4.addView(detailBox);
 
         buildEqCard(root);
+
+        LinearLayout ca = card(root);
+        ca.addView(text("개선 방법", 18, INK, true));
+        ca.addView(text("측정 결과에서 아쉬운 부분을 채우는 방법을 돈이 안 드는 것부터 순서대로 정리했습니다.", 13, MUT, false));
+        adviceBox = new LinearLayout(this);
+        adviceBox.setOrientation(LinearLayout.VERTICAL);
+        ca.addView(adviceBox);
 
         LinearLayout c8 = card(root);
         c8.addView(text("결과 공유", 18, INK, true));
@@ -728,6 +736,149 @@ public class MainActivity extends Activity {
         else knobNote.setText((learned() ? "학습한 내 차 노브 기준으로 계산했습니다. "
                 : "일반적인 노브 형태로 추정한 값입니다(1단계 ≈ 1dB 가정). 아래 노브 학습을 하면 내 차에 정확히 맞춰집니다. ")
                 + "예상 효과: 목표와의 차이 ±" + f1(kf.rmsBefore) + "dB → ±" + f1(kf.rmsAfter) + "dB");
+        renderAdvice(r);
+    }
+
+    // ---------- 개선 방법 ----------
+
+    static final class Advice {
+        final String tier, title, why, effect;
+        final int color;
+        Advice(String tier, int color, String title, String why, String effect) {
+            this.tier = tier; this.color = color; this.title = title; this.why = why; this.effect = effect;
+        }
+    }
+
+    /** 측정 결과로 개선 방법을 비용 순서(무료 → 저비용 → 업그레이드)로 고른다. 필요성이 낮은 것은 skip에 담는다 */
+    private List<Advice> computeAdvice(Dsp.Result r, Dsp.KnobFit kf, List<String> skip) {
+        List<Advice> a = new ArrayList<>();
+        if (r.snr < 20) {
+            a.add(new Advice("먼저", ACC, "다시 측정하기", "측정 신뢰도가 " + Math.round(r.snr) + "dB로 낮아 결과를 믿기 어렵습니다.",
+                    "볼륨을 올리거나 시동을 끄고 다시 측정한 뒤 개선 방법을 확인하세요."));
+            return a;
+        }
+        int up = EqView.UP;
+        if (kf != null && (kf.steps[0] != 0 || kf.steps[1] != 0 || kf.steps[2] != 0)) {
+            a.add(new Advice("무료", OK, "차량 EQ 조정: 저음 " + signed(kf.steps[0]) + " · 중음 " + signed(kf.steps[1]) + " · 고음 " + signed(kf.steps[2]),
+                    "음색 균형이 목표와 평균 ±" + f1(kf.rmsBefore) + "dB 차이 납니다.",
+                    "목표와의 차이가 ±" + f1(kf.rmsAfter) + "dB로 줄어들 것으로 예상됩니다." + (learned() ? "" : " 노브 학습을 하면 더 정확해집니다.")));
+        }
+        if (r.lr) {
+            double ab = Math.abs(r.bal), ad = Math.abs(r.dly);
+            if (ad > 1 || ab > 1.5) a.add(new Advice("무료", OK, "청취 위치를 운전석으로 맞추기",
+                    (r.bal > 0 ? "왼쪽" : "오른쪽") + "이 " + f1(ab) + "dB 크고 " + f1(ad) + "ms 먼저 도착해, 소리가 한쪽으로 쏠립니다.",
+                    "사운드 설정의 청취 위치를 운전석 중심으로 바꾸거나, 좌우 밸런스를 " + (r.bal > 0 ? "오른쪽" : "왼쪽")
+                            + "으로 1~2칸 옮겨 보세요. 소리가 정면에 더 또렷하게 맺힙니다."));
+        } else {
+            a.add(new Advice("무료", OK, "좌·우 분리 측정으로 쏠림 확인", "지금은 스테레오로 측정해 좌우 균형을 알 수 없습니다.",
+                    "좌·우 분리 측정을 하면 소리가 한쪽으로 쏠리는지, 청취 위치 설정이 필요한지 알 수 있습니다."));
+        }
+        a.add(new Advice("무료", OK, "음장 효과 켜고 끄며 비교", "차량의 음장 효과(예: Centerpoint 360, 고급 음향)는 주파수 특성과 공간감을 크게 바꿉니다.",
+                "켠 상태와 끈 상태로 각각 측정해, 점수가 높고 귀에 더 좋게 들리는 쪽을 고르세요."));
+        if (r.thd >= 3) a.add(new Advice("무료", OK, "볼륨 한두 단계 낮추기", "지금 볼륨에서 찌그러짐이 " + f1(r.thd) + "%로 큽니다.",
+                "찌그러짐이 줄어드는 볼륨이 이 시스템이 깨끗하게 낼 수 있는 최대 음량입니다."));
+
+        int narrowLowDips = 0;
+        boolean boxy = false, harshHi = false, dullHi = false;
+        for (Dsp.Issue x : r.issues) {
+            if (x.narrow && x.v < 0 && x.f >= 60 && x.f <= 500) narrowLowDips++;
+            if (x.v > 0 && x.f >= 250 && x.f <= 1000) boxy = true;
+            if (x.v > 0 && x.f >= 2000 && x.f < 10000) harshHi = true;
+            if (x.v < 0 && !x.narrow && x.f >= 2000 && x.f < 10000) dullHi = true;
+        }
+        double after = kf == null ? r.rms : kf.rmsAfter;
+
+        if (boxy || narrowLowDips > 0) a.add(new Advice("저비용", WARN, "도어 방음(댐핑) 시공",
+                boxy ? "250Hz~1kHz 사이가 목표보다 튀어 소리가 울리는 듯 답답할 수 있습니다. 도어 철판이 함께 울리는 경우가 많습니다."
+                        : "중저음 대역에 좁게 꺼진 골이 있습니다. 도어 안쪽 공간의 울림과 새는 소리가 원인일 수 있습니다.",
+                "도어 울림이 줄어 중저음이 단단해지고 주행 소음도 줄어듭니다. 스피커를 바꾸기 전에 해두면 효과가 더 좋습니다."));
+
+        boolean imaging = r.lr && (Math.abs(r.dly) > 1 || Math.abs(r.bal) > 2);
+        if (narrowLowDips >= 2 || imaging || after > 3.5) {
+            String why = "";
+            if (narrowLowDips >= 2) why += "중저음에 좁은 골이 " + narrowLowDips + "곳 있습니다. 스피커끼리 소리가 상쇄되는 현상이라 저·중·고 노브로는 고칠 수 없습니다. ";
+            if (imaging) why += "좌우 도달 시간 차 때문에 소리가 한쪽으로 쏠립니다. ";
+            if (after > 3.5) why += "EQ를 조정해도 목표와의 차이가 ±" + f1(after) + "dB 남습니다.";
+            a.add(new Advice("업그레이드", up, "DSP 장착 + 측정 기반 튜닝", why.trim(),
+                    "스피커마다 EQ와 도달 시간을 따로 맞춰 소리를 정면 중앙에 모으고 골을 줄일 수 있습니다. 장비보다 튜닝하는 사람의 실력이 결과를 좌우합니다."));
+        }
+
+        if (harshHi || dullHi) a.add(new Advice("업그레이드", up, "앞 스피커 교체 (트위터 분리형)",
+                harshHi ? "2~10kHz가 목표보다 튀어 고음이 날카롭게 들릴 수 있습니다." : "2~10kHz가 부족해 소리가 흐리고 답답할 수 있습니다.",
+                "고음 해상도와 보컬 선명도가 좋아집니다. 교체 후에는 DSP나 EQ로 다시 맞춰야 효과가 제대로 납니다."));
+        else skip.add("스피커 교체: 고음 대역이 목표에서 크게 벗어나지 않아 우선순위가 낮습니다.");
+
+        boolean bassLover = r.pref != null && r.pref.bass >= 3;
+        if (r.fb > 50 || (bassLover && r.bass < 70)) a.add(new Advice("업그레이드", up, "서브우퍼 추가",
+                "약 " + fmtF(r.fb) + " 아래부터 저음이 약해집니다" + (bassLover ? " (중저음 선호 취향 기준)" : "") + ".",
+                "더 낮고 깊은 저음이 나오고, 큰 볼륨에서도 저음에 여유가 생깁니다."));
+        else skip.add("서브우퍼: 약 " + (r.fb <= 20 ? "20Hz" : fmtF(r.fb)) + "까지 저음이 나와 지금은 우선순위가 낮습니다.");
+
+        if (r.thd >= 2) a.add(new Advice("업그레이드", up, "외장 앰프",
+                "평소 볼륨에서 찌그러짐이 " + f1(r.thd) + "%입니다. 순정 앰프의 출력이 부족할 수 있습니다.",
+                "큰 볼륨에서도 소리가 찌그러지지 않고 여유가 생깁니다."));
+        else skip.add("외장 앰프: 찌그러짐이 " + f1(r.thd) + "%로 낮아, 이 볼륨에서는 효과가 작습니다.");
+        return a;
+    }
+
+    private void renderAdvice(Dsp.Result r) {
+        adviceBox.removeAllViews();
+        if (r == null) {
+            adviceBox.addView(text("측정하면 아쉬운 부분을 채울 방법을 돈이 안 드는 것부터 순서대로 알려드립니다.", 14, MUT, false));
+            return;
+        }
+        List<String> skip = new ArrayList<>();
+        List<Advice> list = computeAdvice(r, lastKnob, skip);
+        int n = 1;
+        for (Advice a : list) {
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(px(12), px(10), px(12), px(12));
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(px(12));
+            g.setColor(CARD);
+            g.setStroke(px(1), LINE);
+            box.setBackground(g);
+            LinearLayout head = new LinearLayout(this);
+            head.setOrientation(LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.addView(text(n++ + ". " + a.title, 15, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            head.addView(pill(a.tier, a.color));
+            box.addView(head);
+            SpannableStringBuilder sb = new SpannableStringBuilder();
+            append(sb, "측정 결과  ", INK);
+            sb.append(a.why);
+            TextView w = text("", 13, MUT, false);
+            w.setText(sb);
+            w.setLineSpacing(0, 1.25f);
+            w.setPadding(0, px(6), 0, 0);
+            box.addView(w);
+            SpannableStringBuilder eb = new SpannableStringBuilder();
+            append(eb, "기대 효과  ", INK);
+            eb.append(a.effect);
+            TextView e = text("", 13, MUT, false);
+            e.setText(eb);
+            e.setLineSpacing(0, 1.25f);
+            e.setPadding(0, px(4), 0, 0);
+            box.addView(e);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = px(8);
+            adviceBox.addView(box, lp);
+        }
+        if (!skip.isEmpty()) {
+            TextView h = text("지금은 필요성이 낮은 것", 14, INK, true);
+            h.setPadding(0, px(14), 0, px(2));
+            adviceBox.addView(h);
+            for (String s : skip) {
+                TextView t = text("• " + s, 13, MUT, false);
+                t.setLineSpacing(0, 1.25f);
+                adviceBox.addView(t);
+            }
+        }
+        TextView note = text("업그레이드는 하이브리드 차량과 순정 인포테인먼트 시공 경험이 있는 곳에서 하세요. 시공 전후로 같은 위치·같은 볼륨에서 측정해 비교하면 효과를 숫자로 확인할 수 있습니다.", 12, MUT, false);
+        note.setLineSpacing(0, 1.25f);
+        note.setPadding(0, px(12), 0, 0);
+        adviceBox.addView(note);
     }
 
     // ---------- 노브 학습 ----------
@@ -1082,6 +1233,12 @@ public class MainActivity extends Activity {
         if (lastKnob != null) s.append("3밴드 추천(").append(learned() ? "학습값" : "일반형 추정").append("): 저음 ").append(signed(lastKnob.steps[0]))
                 .append(", 중음 ").append(signed(lastKnob.steps[1])).append(", 고음 ").append(signed(lastKnob.steps[2]))
                 .append(String.format(Locale.US, " (목표와의 차이 ±%.1f → ±%.1fdB)\n", lastKnob.rmsBefore, lastKnob.rmsAfter));
+        List<Advice> adv = computeAdvice(r, lastKnob, new ArrayList<>());
+        if (!adv.isEmpty()) {
+            s.append("개선 방법: ");
+            for (int i = 0; i < adv.size(); i++) s.append(i > 0 ? " / " : "").append(adv.get(i).tier).append(") ").append(adv.get(i).title);
+            s.append("\n");
+        }
 
         boolean spread = session.size() > 1;
         s.append("\n[주파수 응답] 1/6옥타브 간격, dB (300Hz~3kHz 평균을 목표 곡선에 맞춤)\nHz");
