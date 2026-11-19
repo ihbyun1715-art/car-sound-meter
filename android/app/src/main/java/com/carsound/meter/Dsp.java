@@ -24,6 +24,53 @@ public final class Dsp {
         return 8 / (1 + (f / 90) * (f / 90)) - (f > 1000 ? 1.2 * log2(f / 1000) : 0);
     }
 
+    /** 듣는 사람의 취향: 기본 목표 곡선에 더할 네 가지 조절값(dB)과 채점 가중치 */
+    public static final class Pref {
+        public final String name;
+        public double bass, lowMid, vocal, treble;
+        public final double wBass, wVocal, wClar;
+
+        public Pref(String name, double bass, double lowMid, double vocal, double treble, double wBass, double wVocal, double wClar) {
+            this.name = name; this.bass = bass; this.lowMid = lowMid; this.vocal = vocal; this.treble = treble;
+            this.wBass = wBass; this.wVocal = wVocal; this.wClar = wClar;
+        }
+
+        public Pref withValues(String newName, double b, double lm, double v, double t) {
+            return new Pref(newName, b, lm, v, t, wBass, wVocal, wClar);
+        }
+    }
+
+    /** 프리셋: 이름, 저음, 중저음, 보컬, 고음, 저음 가중치, 보컬 가중치, 깨끗함 가중치 */
+    public static final Pref[] PRESETS = {
+            new Pref("기본", 0, 0, 0, 0, 1, 1, 1),
+            new Pref("중저음 선호", 4, 2, 0, 0, 1.6, 1, 1),
+            new Pref("또렷한 보컬", 0, -2, 2, 1, 1, 1.8, 1),
+            new Pref("발라드", 1, 1, 1, -1, 1, 1.4, 1),
+            new Pref("락", 3, 0, -1, 2, 1.3, 1, 1.6),
+            new Pref("팝", 4, 0, 1, 1, 1.4, 1.2, 1),
+    };
+
+    static double bell(double f, double fc, double sigmaOct) {
+        double x = log2(f / fc) / sigmaOct;
+        return Math.exp(-0.5 * x * x);
+    }
+
+    /** 취향을 반영한 목표 곡선 */
+    public static double target(double f, Pref p) {
+        if (p == null) return target(f);
+        return target(f)
+                + p.bass / (1 + (f / 100) * (f / 100))
+                + p.lowMid * bell(f, 180, 0.6)
+                + p.vocal * bell(f, 2200, 0.7)
+                + p.treble / (1 + (4000 / f) * (4000 / f));
+    }
+
+    /** 취향에 따라 대역별로 편차를 얼마나 엄격하게 볼지 */
+    static double weight(double f, Pref p) {
+        if (p == null) return 1;
+        return 1 + (p.wBass - 1) / (1 + (f / 150) * (f / 150)) + (p.wVocal - 1) * bell(f, 2200, 0.8);
+    }
+
     public static float[] makeSweep(int fs) {
         int n = (int) Math.round(T * fs), fd = (int) Math.round(0.05 * fs);
         double K = Math.log(F2 / F1);
@@ -231,6 +278,11 @@ public final class Dsp {
 
     /** 여러 위치에서 잰 측정을 평균 내고 점수를 매긴다 */
     public static Result summarize(List<Meas> ms) {
+        return summarize(ms, null);
+    }
+
+    /** 측정은 그대로 두고 취향(p)에 맞춘 목표 곡선으로 채점한다 */
+    public static Result summarize(List<Meas> ms, Pref p) {
         Meas first = ms.get(0);
         int M = ms.size(), nc = first.ch.length;
         Result res = new Result();
@@ -260,10 +312,18 @@ public final class Dsp {
             double s = 0;
             for (Channel c : res.ch) s += c.n[i];
             res.avg[i] = s / nc;
-            dev[i] = res.avg[i] - target(FR[i]);
         }
-        double s = 0; int cnt = 0;
-        for (int i = 0; i < NF; i++) if (FR[i] >= 50 && FR[i] <= 12000) { s += dev[i] * dev[i]; cnt++; }
+        // 취향 목표 곡선에 맞춰 300Hz~3kHz 평균 레벨을 다시 맞춘다
+        double sh = 0; int shc = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= 300 && FR[i] <= 3000) { sh += res.avg[i] - target(FR[i], p); shc++; }
+        sh /= shc;
+        for (int i = 0; i < NF; i++) {
+            res.avg[i] -= sh;
+            for (Channel c : res.ch) c.n[i] -= sh;
+            dev[i] = res.avg[i] - target(FR[i], p);
+        }
+        double s = 0, cnt = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= 50 && FR[i] <= 12000) { double w = weight(FR[i], p); s += w * dev[i] * dev[i]; cnt += w; }
         res.rms = Math.sqrt(s / cnt);
         res.fb = 20;
         for (int i = NF - 1; i >= 0; i--) {
@@ -284,9 +344,12 @@ public final class Dsp {
             for (Meas m : ms) dl += (m.ch[1].raw - m.ch[0].raw) / (double) m.fs * 1000 / M;
             res.dly = dl;
             res.balScore = clamp(100 - (Math.abs(res.bal) - 1) * 15);
-            res.total = 0.45 * res.tone + 0.25 * res.bass + 0.15 * res.clar + 0.15 * res.balScore;
+        }
+        double wb = p == null ? 1 : p.wBass, wc = p == null ? 1 : p.wClar;
+        if (res.lr) {
+            res.total = (0.45 * res.tone + 0.25 * wb * res.bass + 0.15 * wc * res.clar + 0.15 * res.balScore) / (0.45 + 0.25 * wb + 0.15 * wc + 0.15);
         } else {
-            res.total = 0.5 * res.tone + 0.3 * res.bass + 0.2 * res.clar;
+            res.total = (0.5 * res.tone + 0.3 * wb * res.bass + 0.2 * wc * res.clar) / (0.5 + 0.3 * wb + 0.2 * wc);
         }
         // 목표에서 크게 벗어난 구간
         double rf = 0, rv = 0; boolean run = false;
