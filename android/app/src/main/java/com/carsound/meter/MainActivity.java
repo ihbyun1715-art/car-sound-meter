@@ -48,6 +48,8 @@ public class MainActivity extends Activity {
     private final SeekBar[] sliders = new SeekBar[4];
     private final TextView[] sliderVals = new TextView[4];
     private TextView prefHint;
+    private TextView diagView;
+    private Button diagBtn;
     private SharedPreferences store;
 
     @Override
@@ -56,6 +58,7 @@ public class MainActivity extends Activity {
         dp = getResources().getDisplayMetrics().density;
         store = getSharedPreferences("taste", MODE_PRIVATE);
         loadPref();
+        AudioEngine.chosenSource = store.getInt("source", -1);
         getWindow().setStatusBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
 
@@ -136,9 +139,17 @@ public class MainActivity extends Activity {
 
         LinearLayout c6 = card(root);
         c6.addView(text("측정 환경", 18, INK, true));
-        info = text(deviceLine() + "\n가공 없는 마이크 입력 지원: " + (AudioEngine.supportsUnprocessed(this) ? "예" : "아니오 (음성 인식 모드로 대체)"), 14, MUT, false);
+        info = text(deviceLine() + "\n가공 없는 마이크 입력 지원: " + (AudioEngine.supportsUnprocessed(this) ? "예" : "아니오") + "\n" + sourceLine(), 14, MUT, false);
         info.setLineSpacing(0, 1.25f);
         c6.addView(info);
+        c6.addView(text("\n입력 진단: 휴대폰이 쓸 수 있는 녹음 방식 5가지로 같은 신호를 녹음해, 자동 음량 조절이 숨어 있는지와 저음·고음을 얼마나 깎는지 비교합니다. 가장 깨끗한 방식을 자동으로 골라 이후 측정에 씁니다. 차에서, 휴대폰을 움직이지 말고 진행하세요.", 13, MUT, false));
+        diagBtn = button("입력 진단 (약 1분)", false);
+        diagBtn.setOnClickListener(v -> onDiag());
+        c6.addView(diagBtn, lp(px(48), px(10)));
+        diagView = text("", 14, INK, false);
+        diagView.setLineSpacing(0, 1.3f);
+        diagView.setPadding(0, px(8), 0, 0);
+        c6.addView(diagView);
 
         LinearLayout c7 = card(root);
         c7.addView(text("정확하게 재는 법", 18, INK, true));
@@ -311,6 +322,75 @@ public class MainActivity extends Activity {
         return "기기: " + Build.MANUFACTURER + " " + Build.MODEL + " (안드로이드 " + Build.VERSION.RELEASE + ")";
     }
 
+    private String sourceLine() {
+        int c = AudioEngine.chosenSource;
+        return "측정 입력 방식: " + (c >= 0 ? AudioEngine.sourceName(c) + " (진단으로 선택)" : AudioEngine.sourceName(AudioEngine.autoSource(this)) + " (자동, 진단 전)");
+    }
+
+    private void onDiag() {
+        if (busy) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 2);
+            return;
+        }
+        startDiag();
+    }
+
+    private void startDiag() {
+        busy = true;
+        run.setEnabled(false);
+        reset.setEnabled(false);
+        diagBtn.setEnabled(false);
+        run.setAlpha(0.6f);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        diagView.setText("");
+        new Thread(() -> {
+            int[] srcs = AudioEngine.candidateSources();
+            StringBuilder out = new StringBuilder();
+            int best = -1;
+            double bestScore = -1e9;
+            try {
+                for (int i = 0; i < srcs.length; i++) {
+                    String name = AudioEngine.sourceName(srcs[i]);
+                    String label = "입력 진단 " + (i + 1) + "/" + srcs.length + " · " + name + " · ";
+                    ui.post(() -> setStatus(label, false));
+                    float[] rec = AudioEngine.recordWith(this, srcs[i], Dsp.diagStimulus(AudioEngine.FS), label, msg -> ui.post(() -> setStatus(msg, false)));
+                    if (rec == null) {
+                        out.append("• ").append(name).append(": 이 기기에서 쓸 수 없음\n");
+                        continue;
+                    }
+                    ui.post(() -> setStatus(label + "분석 중…", false));
+                    Dsp.Diag d = Dsp.diagnose(rec, AudioEngine.FS);
+                    boolean agc = d.linErr > 1.5;
+                    double score = (d.snr < 20 ? -1000 : 0) + (agc ? -100 : 0) - d.linErr * 5 + d.lowRel + 0.5 * d.highRel + Math.min(d.snr, 50) * 0.1;
+                    out.append("• ").append(name).append(": 자동 음량 ").append(agc ? "있음" : "없음")
+                            .append(String.format(Locale.US, " (오차 %.1fdB) · 저음 %+.1fdB · 고음 %+.1fdB · 신뢰도 %.0fdB\n", d.linErr, d.lowRel, d.highRel, d.snr));
+                    if (score > bestScore) { bestScore = score; best = srcs[i]; }
+                    Thread.sleep(500);
+                }
+                final int chosen = best;
+                final String table = out.toString().trim();
+                ui.post(() -> {
+                    if (chosen >= 0) {
+                        AudioEngine.chosenSource = chosen;
+                        store.edit().putInt("source", chosen).apply();
+                        session.clear();
+                        clearResult("진단 완료 · 이제 '" + AudioEngine.sourceName(chosen) + "' 방식으로 측정합니다. 이전 측정은 지웠습니다.");
+                        diagView.setText(table + "\n\n추천: " + AudioEngine.sourceName(chosen)
+                                + "\n저음·고음 값은 방식끼리 비교하는 상대값입니다. 클수록 덜 깎는다는 뜻입니다.");
+                    } else {
+                        setStatus("진단 실패: 쓸 수 있는 입력 방식이 없습니다.", true);
+                        diagView.setText(table);
+                    }
+                    done();
+                });
+            } catch (Throwable e) {
+                String msg = e instanceof OutOfMemoryError ? "메모리가 부족합니다." : String.valueOf(e.getMessage());
+                ui.post(() -> { setStatus("진단 실패: " + msg, true); diagView.setText(out.toString().trim()); done(); });
+            }
+        }).start();
+    }
+
     private void onRun() {
         if (busy) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -322,7 +402,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
-        if (code == 1 && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startMeasure();
+        if (code == 2 && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startDiag();
+        else if (code == 1 && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startMeasure();
         else setStatus("마이크 권한이 없어 측정할 수 없습니다. 설정에서 마이크 권한을 허용해 주세요.", true);
     }
 
@@ -359,8 +440,9 @@ public class MainActivity extends Activity {
         run.setEnabled(true);
         reset.setEnabled(true);
         run.setAlpha(1f);
+        diagBtn.setEnabled(true);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        info.setText(deviceLine() + "\n" + AudioEngine.lastInfo);
+        info.setText(deviceLine() + "\n" + sourceLine() + "\n최근 녹음 · " + AudioEngine.lastInfo);
     }
 
     private void clearResult(String msg) {
