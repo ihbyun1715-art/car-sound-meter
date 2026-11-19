@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>차량 사운드 측정기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;700&family=Noto+Sans+KR:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+/* VOICE: 정비소 계측기처럼 차분하고 정확하게
+   IDEA: 자동차 계기판 — 타코미터 모양 점수 하나와 오디오 분석기 화면
+   PICTURE: 주파수 응답 그래프(측정 곡선 vs 목표 곡선), 그 옆에 점수 게이지
+   COLOUR and TYPE: 차콜/백색 바탕, 레드라인 코랄 강조, Barlow Semi Condensed 숫자 + Noto Sans KR 본문
+   LAYOUT: 한 컬럼 — 그래프+게이지 → 측정 조작 → 세부 지표 → EQ 제안 → 도움말 */
+:root{color-scheme:light dark;--bg:light-dark(#f3f3f1,#131518);--card:light-dark(#ffffff,#1c1f23);--ink:light-dark(#15171a,#ecebe7);--mut:light-dark(#5f646b,#9ba1a9);--line:light-dark(#dedcd7,#2d3137);--acc:#ff5a4e;--acc2:light-dark(#2f66d0,#79a3ff);--ok:light-dark(#1d7a4a,#5fd39a)}
+:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Noto Sans KR",system-ui,sans-serif;overflow-x:clip}
+.band{padding:clamp(20px,4vw,48px) max(4vw,14px);max-width:1080px;margin:0 auto}
+h1{font:700 clamp(28px,6vw,40px)/1.05 "Barlow Semi Condensed","Noto Sans KR",sans-serif;margin:0 0 6px;text-wrap:balance}
+h2{font:700 20px/1.2 "Noto Sans KR",sans-serif;margin:0 0 12px}
+p{margin:0 0 10px}.mut{color:var(--mut)}.sm{font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:14px}
+.top{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:14px;align-items:stretch}
+.fig{position:relative;min-height:300px}.fig>svg{position:absolute;inset:0;width:100%;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--mut);margin-top:8px}
+.legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:6px;border-radius:2px}
+.gauge{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.gauge svg{width:100%;max-width:200px}
+.num{font:700 52px/1 "Barlow Semi Condensed",sans-serif}
+.grade{font-weight:700;margin-top:4px}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+button,.btn,select{font:600 16px "Noto Sans KR",sans-serif;min-height:46px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:0 16px;cursor:pointer}
+button:focus-visible,select:focus-visible,label.btn:focus-within{outline:3px solid var(--acc2);outline-offset:2px}
+.seg button[aria-pressed=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.go{background:var(--acc);border-color:var(--acc);color:#fff;width:100%;font-size:18px;min-height:56px}
+.go:disabled{opacity:.55;cursor:wait}
+select{width:100%;margin:6px 0 12px}
+.btn{display:inline-flex;align-items:center;justify-content:center}
+input[type=file]{position:absolute;opacity:0;width:1px;height:1px}
+ol{padding-left:20px;margin:0 0 12px}li{margin-bottom:4px}
+.status{margin-top:10px;min-height:24px;font-weight:600}
+.bar{display:grid;grid-template-columns:7.5em minmax(0,1fr) 3em;gap:10px;align-items:center;margin:9px 0}
+.track{height:10px;background:var(--line);border-radius:6px;overflow:hidden}
+.track b{display:block;height:100%;background:var(--acc);border-radius:6px;transition:width .6s}
+.bar span:last-child{text-align:right;font:700 18px "Barlow Semi Condensed",sans-serif}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+.facts div{border-top:1px solid var(--line);padding-top:8px}
+.facts strong{display:block;font:700 22px/1.2 "Barlow Semi Condensed",sans-serif;white-space:nowrap}
+.eq{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:4px;height:150px;align-items:stretch;margin-top:6px}
+.eq div{display:grid;grid-template-rows:1fr 1fr auto auto;text-align:center;font-size:12px}
+.eq .u,.eq .d{display:flex;justify-content:center}.eq .u{align-items:flex-end;border-bottom:1px solid var(--mut)}
+.eq .u b,.eq .d b{width:60%;max-width:22px;background:var(--acc2);border-radius:3px}
+.eq .v{font:700 14px "Barlow Semi Condensed",sans-serif;margin-top:4px}
+.warn{color:var(--acc);font-weight:600}
+ul.iss{padding-left:18px;margin:6px 0 0}
+details{margin-top:10px}summary{cursor:pointer;font-weight:600;min-height:32px}
+.hide{display:none}
+@media(max-width:600px){.top{grid-template-columns:minmax(0,1fr)}.gauge{flex-direction:row;gap:14px;justify-content:flex-start;text-align:left}.gauge svg{width:130px}.num{font-size:44px}.fig{min-height:250px}}
+@media(prefers-reduced-motion:reduce){.track b{transition:none}}
+</style>
+</head>
+<body>
+<div class="band">
+  <h1>차량 사운드 측정기</h1>
+  <p class="mut">테스트 신호를 차량 스피커로 틀고 휴대폰 마이크로 받아, 주파수 응답·저음·왜곡·좌우 밸런스를 점수로 보여줍니다.</p>
+
+  <div class="top">
+    <div class="card" style="margin-top:0">
+      <div class="fig"><svg id="fr" role="img" aria-label="주파수 응답 그래프"></svg></div>
+      <div class="legend" id="lg"><span><i style="background:var(--mut)"></i>목표 곡선(차량용 근사)</span></div>
+    </div>
+    <div class="card gauge" style="margin-top:0">
+      <svg viewBox="0 0 120 70" aria-hidden="true">
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--line)" stroke-width="10" stroke-linecap="round"/>
+        <path id="garc" d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--acc)" stroke-width="10" stroke-linecap="round" pathLength="100" stroke-dasharray="0 100"/>
+      </svg>
+      <div><div class="num" id="score">--</div><div class="grade" id="grade">측정 전</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>측정</h2>
+    <div class="seg" role="group" aria-label="측정 방식">
+      <button id="mSt" aria-pressed="true">스테레오 (약 11초)</button>
+      <button id="mLR" aria-pressed="false">좌·우 분리 (약 21초)</button>
+    </div>
+    <div class="seg" role="group" aria-label="입력 방식" style="margin-top:8px">
+      <button id="tLive" aria-pressed="true">실시간 마이크</button>
+      <button id="tFile" aria-pressed="false">녹음 파일 올리기</button>
+    </div>
+
+    <div id="pLive" style="margin-top:14px">
+      <label for="mic" class="sm mut">입력 마이크 (차량 핸즈프리 마이크가 아니라 휴대폰 내장 마이크를 고르세요)</label>
+      <select id="mic"><option value="">기본 마이크</option></select>
+      <button class="go" id="run">측정 시작</button>
+    </div>
+
+    <div id="pFile" class="hide" style="margin-top:14px">
+      <ol>
+        <li>휴대폰 녹음 앱에서 녹음을 시작합니다.</li>
+        <li>이 화면으로 돌아와 <b>테스트 신호 재생</b>을 누릅니다.</li>
+        <li>재생이 끝나고 2초 뒤 녹음을 멈추고, 파일을 올립니다.</li>
+      </ol>
+      <div class="seg">
+        <button id="play">테스트 신호 재생</button>
+        <button id="pick">녹음 파일 선택</button><input type="file" id="file" accept="audio/*">
+      </div>
+      <p class="sm mut" style="margin-top:8px">녹음 앱은 자동 음량 보정이 걸려 실시간 측정보다 덜 정확합니다. 위에서 고른 측정 방식과 같은 신호로 녹음해야 합니다.</p>
+    </div>
+    <div class="status" id="st" role="status"></div>
+  </div>
+
+  <div class="card hide" id="res">
+    <h2>세부 결과</h2>
+    <div id="bars"></div>
+    <div class="facts" id="facts"></div>
+    <div id="iss"></div>
+  </div>
+
+  <div class="card hide" id="eqc">
+    <h2>EQ 조정 제안</h2>
+    <p class="sm mut">차량 이퀄라이저에서 아래 값만큼 올리거나 내려 보세요. 대역 이름이 조금 달라도 가장 가까운 값을 쓰면 됩니다.</p>
+    <div class="eq" id="eq"></div>
+  </div>
+
+  <div class="card">
+    <h2>정확하게 재는 법</h2>
+    <ul class="iss">
+      <li>휴대폰을 운전석 머리 높이(귀 위치)에 세로로 들고, 마이크 구멍을 막지 마세요.</li>
+      <li>차량 EQ·음장 효과를 끄고(플랫), 평소 듣는 볼륨에서 측정하세요.</li>
+      <li>시동을 끄거나 조용한 곳에서 재면 신뢰도가 올라갑니다.</li>
+      <li>머리 위치를 조금씩 옮겨 2~3번 재고 비슷한지 확인하세요.</li>
+    </ul>
+    <details>
+      <summary>블루투스로 연결할 때 꼭 확인할 점</summary>
+      <p>마이크를 켜는 순간 휴대폰이 차량을 '통화 장치'로 바꿔 음질이 전화 수준으로 떨어질 수 있습니다. 휴대폰 블루투스 설정에서 차량의 <b>전화 통화</b> 항목을 끄고 <b>미디어 오디오</b>만 켜 두세요. USB나 AUX 연결이면 이 문제가 없습니다.</p>
+    </details>
+    <details>
+      <summary>이 측정의 한계</summary>
+      <p>휴대폰 마이크는 50Hz 아래와 12kHz 위를 정확히 잡지 못해, 그 대역 점수는 참고용입니다. 블루투스 압축도 고음에 영향을 줍니다. 목표 곡선은 하만 차량 타깃을 단순화한 근사치입니다. 같은 폰으로 설정 전후를 비교하는 용도에 가장 잘 맞습니다.</p>
+    </details>
+  </div>
+</div>
+
+<script>
+{
+// ===== DSP START =====
+const T=8,F1=20,F2=20000,LEAD=0.5,GAP=2.5,TAIL=2.0;
+const FR=[];for(let i=0;i<=240;i++)FR.push(20*Math.pow(1000,i/240));
+const target=f=>8/(1+(f/90)**2)-(f>1000?1.2*Math.log2(f/1000):0);
+const clamp=v=>Math.max(0,Math.min(100,v));
+
+function makeSweep(fs){
+  const n=Math.round(T*fs),K=Math.log(F2/F1),s=new Float32Array(n),fd=Math.round(0.05*fs);
+  for(let i=0;i<n;i++){
+    let v=Math.sin(2*Math.PI*F1*T/K*(Math.exp(i/fs*K/T)-1));
+    if(i<fd)v*=0.5-0.5*Math.cos(Math.PI*i/fd);
+    if(i>n-fd)v*=0.5-0.5*Math.cos(Math.PI*(n-i)/fd);
+    s[i]=v*0.5;
+  }
+  return s;
+}
+function fft(re,im,inv){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;
+    if(i<j){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t;}}
+  for(let len=2;len<=n;len<<=1){
+    const a=2*Math.PI/len*(inv?1:-1),wr=Math.cos(a),wi=Math.sin(a),h=len>>1;
+    for(let i=0;i<n;i+=len){let cr=1,ci=0;
+      for(let k=0;k<h;k++){const p=i+k,q=p+h,xr=re[q]*cr-im[q]*ci,xi=re[q]*ci+im[q]*cr;
+        re[q]=re[p]-xr;im[q]=im[p]-xi;re[p]+=xr;im[p]+=xi;const t=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=t;}}}
+  if(inv)for(let i=0;i<n;i++){re[i]/=n;im[i]/=n;}
+}
+function deconv(y,x,fs){
+  let N=1;while(N<y.length+x.length)N<<=1;
+  const yr=new Float64Array(N),yi=new Float64Array(N),xr=new Float64Array(N),xi=new Float64Array(N);
+  yr.set(y);xr.set(x);fft(yr,yi);fft(xr,xi);
+  let mx=0;for(let k=0;k<N;k++){const p=xr[k]*xr[k]+xi[k]*xi[k];if(p>mx)mx=p;}
+  const eps=mx*1e-5,df=fs/N,tw=f=>f<=12||f>=Math.min(22000,fs/2)?0:f<18?0.5-0.5*Math.cos(Math.PI*(f-12)/6):f>20000?0.5+0.5*Math.cos(Math.PI*(f-20000)/(Math.min(22000,fs/2)-20000)):1;
+  for(let k=0;k<N;k++){const f=(k<=N/2?k:N-k)*df,w=tw(f);
+    if(!w){yr[k]=0;yi[k]=0;continue;}
+    const p=xr[k]*xr[k]+xi[k]*xi[k]+eps,r=(yr[k]*xr[k]+yi[k]*xi[k])/p*w,m=(yi[k]*xr[k]-yr[k]*xi[k])/p*w;yr[k]=r;yi[k]=m;}
+  fft(yr,yi,true);return yr;
+}
+function seg(h,start,WL){
+  const N=h.length,o=new Float64Array(WL),fl=Math.round(WL*0.6);
+  for(let i=0;i<WL;i++){const w=i<fl?1:0.5+0.5*Math.cos(Math.PI*(i-fl)/(WL-fl));o[i]=h[((start+i)%N+N)%N]*w;}
+  return o;
+}
+const energy=s=>{let e=0;for(const v of s)e+=v*v;return e;};
+function spectrum(s,fs){
+  const WL=s.length,re=Float64Array.from(s),im=new Float64Array(WL);fft(re,im);
+  const df=fs/WL,P=new Float64Array(WL/2);for(let k=0;k<WL/2;k++)P[k]=re[k]*re[k]+im[k]*im[k];
+  return FR.map(f=>{const lo=Math.max(1,Math.floor(f*2**(-1/12)/df)),hi=Math.max(lo,Math.ceil(f*2**(1/12)/df));
+    let t=0,c=0;for(let k=lo;k<=hi&&k<WL/2;k++){t+=P[k];c++;}return 10*Math.log10(t/Math.max(c,1)+1e-30);});
+}
+function normalize(db){
+  let s=0,c=0;FR.forEach((f,i)=>{if(f>=300&&f<=3000){s+=db[i]-target(f);c++;}});
+  const off=s/c;return db.map(v=>v-off);
+}
+function analyze(rec,fs,mode){
+  const sw=makeSweep(fs),h=deconv(rec,sw,fs),N=h.length;
+  let WL=1;while(WL<0.34*fs)WL<<=1;
+  let pk=0,pv=0;for(let i=0;i<N;i++){const a=Math.abs(h[i]);if(a>pv){pv=a;pk=i;}}
+  const pre=Math.round(0.002*fs),chans=[];
+  if(mode==='st')chans.push({name:'측정',p:pk});
+  else{
+    const D=Math.round((T+GAP)*fs),r=Math.round(0.05*fs);
+    const lm=c=>{let m=0,ix=c;for(let i=-r;i<=r;i++){const j=((c+i)%N+N)%N,a=Math.abs(h[j]);if(a>m){m=a;ix=j;}}return[m,ix];};
+    const a=lm(pk+D),b=lm(pk-D);
+    const [Lp,Rp]=a[0]>b[0]?[pk,a[1]]:[b[1],pk];
+    chans.push({name:'왼쪽',p:Lp,raw:Lp},{name:'오른쪽',p:Rp,raw:Rp-D});
+  }
+  const dts=[2,3].map(k=>Math.round(T*Math.log(k)/Math.log(F2/F1)*fs));
+  for(const c of chans){
+    const s=seg(h,c.p-pre,WL);c.E=energy(s);c.n=normalize(spectrum(s,fs));
+    const nz=energy(seg(h,c.p+Math.round(0.45*fs),WL));
+    c.snr=10*Math.log10(c.E/Math.max(nz,1e-30));
+    let he=0;for(const d of dts)he+=Math.max(0,energy(seg(h,c.p-d-pre,WL))-nz);
+    c.thd=100*Math.sqrt(he/c.E);
+  }
+  const res={mode,chans,clip:rec.reduce((m,v)=>Math.max(m,Math.abs(v)),0)};
+  res.avg=FR.map((f,i)=>chans.reduce((a,c)=>a+c.n[i],0)/chans.length);
+  const dev=FR.map((f,i)=>res.avg[i]-target(f));
+  let s=0,c=0;FR.forEach((f,i)=>{if(f>=50&&f<=12000){s+=dev[i]**2;c++;}});res.rms=Math.sqrt(s/c);
+  res.fb=20;for(let i=FR.length-1;i>=0;i--){if(FR[i]>100)continue;if(dev[i]<-6){res.fb=FR[i];break;}}
+  res.thd=Math.max(...chans.map(c=>c.thd));res.snr=Math.min(...chans.map(c=>c.snr));
+  const sc={tone:clamp(100-(res.rms-2)*12),bass:clamp(100-Math.log2(Math.max(res.fb,35)/35)*55),clar:clamp(100-(res.thd-1)*12)};
+  if(mode==='lr'){
+    const [L,R]=chans;let d=0,k=0;FR.forEach((f,i)=>{if(f>=200&&f<=4000){d+=L.n[i]-R.n[i]+(10*Math.log10(L.E/R.E));k++;}});
+    res.bal=d/k;res.dly=(R.raw-L.raw)/fs*1000;
+    sc.bal=clamp(100-(Math.abs(res.bal)-1)*15);
+    res.total=0.45*sc.tone+0.25*sc.bass+0.15*sc.clar+0.15*sc.bal;
+  }else res.total=0.5*sc.tone+0.3*sc.bass+0.2*sc.clar;
+  res.sc=sc;
+  res.issues=[];let run=null;
+  FR.forEach((f,i)=>{const v=dev[i],bad=f>=40&&f<=12000&&(v>5||v<-6);
+    if(bad){if(!run||Math.sign(v)!==Math.sign(run.v))run&&res.issues.push(run),run={f,v};else if(Math.abs(v)>Math.abs(run.v))run={f,v};}
+    else if(run){res.issues.push(run);run=null;}});
+  if(run)res.issues.push(run);
+  res.eq=[63,125,250,500,1000,2000,4000,8000,16000].map(b=>{let t=0,n=0;FR.forEach((f,i)=>{if(f>=b/Math.SQRT2&&f<=b*Math.SQRT2){t+=dev[i];n++;}});
+    return{b,g:Math.max(-6,Math.min(6,-Math.round(t/n)))};});
+  return res;
+}
+// ===== DSP END =====
+
+const $=id=>document.getElementById(id);
+let ctx=null,mode='st',last=null,busy=false;
+const getCtx=()=>ctx||(ctx=new(window.AudioContext||window.webkitAudioContext)());
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const say=(t,w)=>{$('st').textContent=t;$('st').className='status'+(w?' warn':'');};
+const fmtF=f=>f>=1000?(f/1000).toFixed(f>=10000?0:1).replace('.0','')+'kHz':Math.round(f)+'Hz';
+
+function stimulus(c,m){
+  const fs=c.sampleRate,sw=makeSweep(fs),ld=Math.round(LEAD*fs),gp=Math.round(GAP*fs),tl=Math.round(TAIL*fs);
+  const len=m==='st'?ld+sw.length+tl:ld+2*sw.length+gp+tl,b=c.createBuffer(2,len,fs);
+  b.getChannelData(0).set(sw,ld);b.getChannelData(1).set(sw,m==='st'?ld:ld+sw.length+gp);
+  return b;
+}
+async function countdown(sec,label){
+  const t0=performance.now();
+  while(performance.now()-t0<sec*1000){say(`${label} ${Math.ceil(sec-(performance.now()-t0)/1000)}초`);await wait(250);}
+}
+async function fillMics(){
+  try{const ds=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audioinput');
+    const cur=$('mic').value;
+    $('mic').innerHTML='<option value="">기본 마이크</option>'+ds.map((d,i)=>`<option value="${d.deviceId}">${(d.label||'마이크 '+(i+1)).replace(/</g,'&lt;')}</option>`).join('');
+    $('mic').value=cur;}catch(e){}
+}
+function toFile(msg){say(msg,true);setTab('file');}
+
+async function runLive(){
+  if(busy)return;busy=true;$('run').disabled=true;
+  const c=getCtx();
+  try{await c.resume();
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('nomic');
+    const id=$('mic').value;
+    const stream=await navigator.mediaDevices.getUserMedia({audio:{deviceId:id?{exact:id}:undefined,echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
+    fillMics();
+    const src=c.createMediaStreamSource(stream),pr=c.createScriptProcessor(4096,1,1),g=c.createGain();g.gain.value=0;
+    const chunks=[];let on=true;
+    pr.onaudioprocess=e=>{if(on)chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));};
+    src.connect(pr);pr.connect(g);g.connect(c.destination);
+    const m=mode,b=stimulus(c,m),s=c.createBufferSource();s.buffer=b;s.connect(c.destination);
+    await wait(400);s.start();
+    await countdown(b.duration+0.8,'측정 중… 조용히 해 주세요');
+    on=false;s.disconnect();src.disconnect();pr.disconnect();stream.getTracks().forEach(t=>t.stop());
+    let n=0;for(const k of chunks)n+=k.length;const rec=new Float32Array(n);n=0;for(const k of chunks){rec.set(k,n);n+=k.length;}
+    await process(rec,c.sampleRate,m);
+  }catch(e){
+    if(e.message==='nomic'||e.name==='NotAllowedError'||e.name==='SecurityError')
+      toFile('이 화면에서는 마이크를 쓸 수 없습니다. 아래 녹음 파일 방식으로 측정하거나, 이 페이지를 HTTPS 주소에서 열어 주세요.');
+    else say('측정 실패: '+(e.message||e.name),true);
+  }finally{busy=false;$('run').disabled=false;}
+}
+async function process(rec,fs,m){
+  say('분석 중…');await wait(50);
+  try{last=analyze(rec,fs,m);render(last);say('측정 완료');}
+  catch(e){say('분석 실패: 녹음이 너무 짧거나 신호가 없습니다.',true);}
+}
+$('play').onclick=async()=>{
+  const c=getCtx();await c.resume();const b=stimulus(c,mode),s=c.createBufferSource();s.buffer=b;s.connect(c.destination);s.start();
+  $('play').disabled=true;await countdown(b.duration,'재생 중…');$('play').disabled=false;say('재생 끝 — 2초 뒤 녹음을 멈추고 파일을 올리세요.');
+};
+$('file').onchange=async()=>{
+  const f=$('file').files[0];if(!f)return;
+  try{const c=getCtx();say('파일 읽는 중…');const b=await c.decodeAudioData(await f.arrayBuffer());
+    let r=b.getChannelData(0);if(r.length>60*c.sampleRate)r=r.subarray(0,60*c.sampleRate);
+    await process(r,c.sampleRate,mode);}
+  catch(e){say('이 파일 형식을 읽지 못했습니다. m4a, wav, mp3로 녹음해 보세요.',true);}
+  $('file').value='';
+};
+$('run').onclick=runLive;
+$('pick').onclick=()=>{say('파일 선택 창이 안 뜨면, 이 링크를 크롬 브라우저에서 열어 주세요.');$('file').click();};
+const setMode=m=>{mode=m;$('mSt').setAttribute('aria-pressed',m==='st');$('mLR').setAttribute('aria-pressed',m==='lr');};
+const setTab=t=>{$('tLive').setAttribute('aria-pressed',t==='live');$('tFile').setAttribute('aria-pressed',t==='file');
+  $('pLive').classList.toggle('hide',t!=='live');$('pFile').classList.toggle('hide',t!=='file');};
+$('mSt').onclick=()=>setMode('st');$('mLR').onclick=()=>setMode('lr');
+$('tLive').onclick=()=>setTab('live');$('tFile').onclick=()=>setTab('file');
+
+const COLS=['var(--acc)','var(--acc2)'];
+function draw(){
+  const s=$('fr'),W=s.clientWidth,H=s.clientHeight;if(!W||!H)return;
+  const nar=W<520,pl=34,pr=10,pt=10,pb=24,Y0=15,Y1=-25;
+  const X=f=>pl+Math.log(f/20)/Math.log(1000)*(W-pl-pr);
+  const Y=d=>pt+(Y0-Math.max(Y1,Math.min(Y0,d)))/(Y0-Y1)*(H-pt-pb);
+  let o='';
+  for(let d=-20;d<=10;d+=10)o+=`<line x1="${pl}" x2="${W-pr}" y1="${Y(d)}" y2="${Y(d)}" stroke="var(--line)"/><text x="${pl-6}" y="${Y(d)+4}" text-anchor="end" font-size="11" fill="var(--mut)">${d>0?'+':''}${d}</text>`;
+  const tk=nar?[[20,'20'],[100,'100'],[1000,'1k'],[10000,'10k']]:[[20,'20'],[50,'50'],[100,'100'],[200,'200'],[500,'500'],[1000,'1k'],[2000,'2k'],[5000,'5k'],[10000,'10k'],[20000,'20k']];
+  for(const[f,l]of tk)o+=`<line x1="${X(f)}" x2="${X(f)}" y1="${pt}" y2="${H-pb}" stroke="var(--line)"/><text x="${X(f)}" y="${H-6}" text-anchor="middle" font-size="11" fill="var(--mut)">${l}</text>`;
+  o+=`<text x="${W-pr}" y="${pt+12}" text-anchor="end" font-size="11" fill="var(--mut)">dB · Hz</text>`;
+  const path=a=>'M'+FR.map((f,i)=>X(f).toFixed(1)+' '+Y(a[i]).toFixed(1)).join('L');
+  o+=`<path d="${path(FR.map(target))}" fill="none" stroke="var(--mut)" stroke-width="2" stroke-dasharray="6 5"/>`;
+  if(last)last.chans.forEach((c,i)=>{o+=`<path d="${path(c.n)}" fill="none" stroke="${COLS[i]}" stroke-width="2.5" stroke-linejoin="round"/>`;});
+  else o+=`<text x="${(pl+W-pr)/2}" y="${Y(-14)}" text-anchor="middle" font-size="13" fill="var(--mut)">측정하면 여기에 곡선이 그려집니다</text>`;
+  s.innerHTML=o;
+}
+new ResizeObserver(draw).observe($('fr'));
+
+function render(r){
+  const t=Math.round(r.total);
+  $('score').textContent=t;$('garc').setAttribute('stroke-dasharray',`${t} 100`);
+  $('grade').textContent=t>=85?'매우 좋음':t>=70?'좋음':t>=55?'보통':'개선 필요';
+  $('lg').innerHTML='<span><i style="background:var(--mut)"></i>목표 곡선(차량용 근사)</span>'+r.chans.map((c,i)=>`<span><i style="background:${COLS[i]}"></i>${c.name}</span>`).join('');
+  const rows=[['음색 균형',r.sc.tone],['저음 확장',r.sc.bass],['깨끗함',r.sc.clar]];if(r.sc.bal!=null)rows.push(['좌우 밸런스',r.sc.bal]);
+  $('bars').innerHTML=rows.map(([n,v])=>`<div class="bar"><span>${n}</span><div class="track"><b style="width:${Math.round(v)}%"></b></div><span>${Math.round(v)}</span></div>`).join('');
+  const rel=r.snr>=40?'높음':r.snr>=25?'보통':'낮음';
+  const facts=[['목표 대비 편차',`±${r.rms.toFixed(1)} dB`],['저음 한계',r.fb<=20?'20Hz 이하':fmtF(r.fb)],['왜곡(추정)',`${r.thd.toFixed(1)} %`],['측정 신뢰도',`${rel} (${Math.round(r.snr)} dB)`]];
+  if(r.bal!=null){facts.push(['좌우 음량 차',`${r.bal>0?'왼쪽':'오른쪽'} +${Math.abs(r.bal).toFixed(1)} dB`]);
+    facts.push(['도달 시간 차',`${r.dly>0?'왼쪽':'오른쪽'}이 ${Math.abs(r.dly).toFixed(1)} ms 빠름 (약 ${Math.round(Math.abs(r.dly)*34.3)} cm)`]);}
+  $('facts').innerHTML=facts.map(([a,b])=>`<div><span class="sm mut">${a}</span><strong>${b}</strong></div>`).join('');
+  const notes=[];
+  if(r.clip>0.98)notes.push('<li class="warn">마이크 입력이 넘쳤습니다. 볼륨을 조금 낮추고 다시 재세요.</li>');
+  if(r.snr<25)notes.push('<li class="warn">신호가 소음에 묻혔습니다. 볼륨을 올리거나 시동을 끄고 다시 재세요.</li>');
+  r.issues.slice(0,6).forEach(x=>notes.push(`<li>${fmtF(x.f)} 부근이 목표보다 ${x.v>0?'+':''}${x.v.toFixed(0)} dB — ${x.v>0?(x.f<300?'저음이 웅웅거릴 수 있습니다':'소리가 쏘거나 거칠게 들릴 수 있습니다'):(x.f<300?'저음이 빈약하게 들립니다':'이 대역이 묻혀 답답하게 들립니다')}</li>`));
+  if(r.dly!=null&&Math.abs(r.dly)>1)notes.push('<li>가까운 쪽 스피커 소리가 먼저 와서 소리 중심이 한쪽으로 쏠립니다. 헤드유닛에 타임 얼라인먼트(청취 위치) 설정이 있다면 운전석으로 맞춰 보세요.</li>');
+  if(r.thd>3)notes.push('<li>볼륨을 올렸을 때 찌그러짐이 큽니다. 한두 단계 낮춰 다시 재 보고 점수가 오르면 그 볼륨이 한계입니다.</li>');
+  $('iss').innerHTML=notes.length?`<h2 style="margin-top:16px">눈에 띄는 점</h2><ul class="iss">${notes.join('')}</ul>`:'<p class="sm mut" style="margin-top:12px">목표 곡선에서 크게 벗어난 대역이 없습니다.</p>';
+  $('eq').innerHTML=r.eq.map(({b,g})=>`<div><div class="u">${g>0?`<b style="height:${g/6*100}%"></b>`:''}</div><div class="d">${g<0?`<b style="height:${-g/6*100}%"></b>`:''}</div><div class="v">${g>0?'+':''}${g}</div><div class="mut">${fmtF(b).replace('Hz','')}</div></div>`).join('');
+  $('res').classList.remove('hide');$('eqc').classList.remove('hide');
+  draw();
+}
+draw();
+}
+</script>
+</body>
+</html>
