@@ -33,7 +33,8 @@ public class MainActivity extends Activity {
     static final int BG = 0xFFF3F3F1, CARD = 0xFFFFFFFF, INK = 0xFF15171A, MUT = 0xFF5F646B, LINE = 0xFFDEDCD7, ACC = 0xFFFF5A4E;
 
     private FrView chart;
-    private TextView score, grade, count, status, legend, details, eq, info;
+    private TextView score, grade, count, status, legend, details, eqNote, info;
+    private EqView eqView;
     private Button run, reset;
     private RadioButton modeLr;
     private final List<Dsp.Meas> session = new ArrayList<>();
@@ -48,7 +49,7 @@ public class MainActivity extends Activity {
     private final SeekBar[] sliders = new SeekBar[4];
     private final TextView[] sliderVals = new TextView[4];
     private TextView prefHint;
-    private TextView diagView;
+    private LinearLayout diagList;
     private Button diagBtn;
     private SharedPreferences store;
 
@@ -131,11 +132,15 @@ public class MainActivity extends Activity {
 
         LinearLayout c5 = card(root);
         c5.addView(text("EQ 조정 제안", 18, INK, true));
-        c5.addView(text("차량 이퀄라이저에서 아래 값만큼 올리거나 내려 보세요.", 13, MUT, false));
-        eq = text("", 15, INK, false);
-        eq.setTypeface(Typeface.MONOSPACE);
-        eq.setPadding(0, px(8), 0, 0);
-        c5.addView(eq);
+        c5.addView(text("차량 이퀄라이저에서 각 대역을 막대만큼 올리거나 내려 보세요. 대역 이름이 조금 달라도 가장 가까운 값을 쓰면 됩니다.", 13, MUT, false));
+        eqView = new EqView(this);
+        LinearLayout.LayoutParams eqLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        eqLp.topMargin = px(12);
+        c5.addView(eqView, eqLp);
+        eqNote = text("", 13, MUT, false);
+        eqNote.setLineSpacing(0, 1.3f);
+        eqNote.setPadding(0, px(6), 0, 0);
+        c5.addView(eqNote);
 
         LinearLayout c6 = card(root);
         c6.addView(text("측정 환경", 18, INK, true));
@@ -146,10 +151,10 @@ public class MainActivity extends Activity {
         diagBtn = button("입력 진단 (약 1분)", false);
         diagBtn.setOnClickListener(v -> onDiag());
         c6.addView(diagBtn, lp(px(48), px(10)));
-        diagView = text("", 14, INK, false);
-        diagView.setLineSpacing(0, 1.3f);
-        diagView.setPadding(0, px(8), 0, 0);
-        c6.addView(diagView);
+        diagList = new LinearLayout(this);
+        diagList.setOrientation(LinearLayout.VERTICAL);
+        c6.addView(diagList);
+        renderDiag(loadDiag(), AudioEngine.chosenSource);
 
         LinearLayout c7 = card(root);
         c7.addView(text("정확하게 재는 법", 18, INK, true));
@@ -343,10 +348,10 @@ public class MainActivity extends Activity {
         diagBtn.setEnabled(false);
         run.setAlpha(0.6f);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        diagView.setText("");
+        diagList.removeAllViews();
         new Thread(() -> {
             int[] srcs = AudioEngine.candidateSources();
-            StringBuilder out = new StringBuilder();
+            List<DiagItem> items = new ArrayList<>();
             int best = -1;
             double bestScore = -1e9;
             try {
@@ -356,39 +361,170 @@ public class MainActivity extends Activity {
                     ui.post(() -> setStatus(label, false));
                     float[] rec = AudioEngine.recordWith(this, srcs[i], Dsp.diagStimulus(AudioEngine.FS), label, msg -> ui.post(() -> setStatus(msg, false)));
                     if (rec == null) {
-                        out.append("• ").append(name).append(": 이 기기에서 쓸 수 없음\n");
+                        items.add(new DiagItem(srcs[i], null));
                         continue;
                     }
                     ui.post(() -> setStatus(label + "분석 중…", false));
                     Dsp.Diag d = Dsp.diagnose(rec, AudioEngine.FS);
                     boolean agc = d.linErr > 1.5;
                     double score = (d.snr < 20 ? -1000 : 0) + (agc ? -100 : 0) - d.linErr * 5 + d.lowRel + 0.5 * d.highRel + Math.min(d.snr, 50) * 0.1;
-                    out.append("• ").append(name).append(": 자동 음량 ").append(agc ? "있음" : "없음")
-                            .append(String.format(Locale.US, " (오차 %.1fdB) · 저음 %+.1fdB · 고음 %+.1fdB · 신뢰도 %.0fdB\n", d.linErr, d.lowRel, d.highRel, d.snr));
+                    items.add(new DiagItem(srcs[i], d));
                     if (score > bestScore) { bestScore = score; best = srcs[i]; }
                     Thread.sleep(500);
                 }
                 final int chosen = best;
-                final String table = out.toString().trim();
+                saveDiag(items);
                 ui.post(() -> {
                     if (chosen >= 0) {
                         AudioEngine.chosenSource = chosen;
                         store.edit().putInt("source", chosen).apply();
                         session.clear();
                         clearResult("진단 완료 · 이제 '" + AudioEngine.sourceName(chosen) + "' 방식으로 측정합니다. 이전 측정은 지웠습니다.");
-                        diagView.setText(table + "\n\n추천: " + AudioEngine.sourceName(chosen)
-                                + "\n저음·고음 값은 방식끼리 비교하는 상대값입니다. 클수록 덜 깎는다는 뜻입니다.");
+                        renderDiag(items, chosen);
                     } else {
                         setStatus("진단 실패: 쓸 수 있는 입력 방식이 없습니다.", true);
-                        diagView.setText(table);
+                        renderDiag(items, -1);
                     }
                     done();
                 });
             } catch (Throwable e) {
                 String msg = e instanceof OutOfMemoryError ? "메모리가 부족합니다." : String.valueOf(e.getMessage());
-                ui.post(() -> { setStatus("진단 실패: " + msg, true); diagView.setText(out.toString().trim()); done(); });
+                ui.post(() -> { setStatus("진단 실패: " + msg, true); renderDiag(items, -1); done(); });
             }
         }).start();
+    }
+
+    static final int OK = 0xFF1D7A4A, WARN = 0xFFB7791F;
+
+    static final class DiagItem {
+        final int src;
+        final Dsp.Diag d;
+        DiagItem(int src, Dsp.Diag d) { this.src = src; this.d = d; }
+    }
+
+    private void saveDiag(List<DiagItem> items) {
+        StringBuilder s = new StringBuilder();
+        for (DiagItem it : items) {
+            if (s.length() > 0) s.append(';');
+            s.append(it.src);
+            if (it.d != null) s.append(String.format(Locale.US, ",%.3f,%.3f,%.3f,%.3f", it.d.linErr, it.d.lowRel, it.d.highRel, it.d.snr));
+        }
+        store.edit().putString("diag", s.toString()).apply();
+    }
+
+    private List<DiagItem> loadDiag() {
+        List<DiagItem> items = new ArrayList<>();
+        String s = store.getString("diag", "");
+        if (s.isEmpty()) return items;
+        try {
+            for (String part : s.split(";")) {
+                String[] f = part.split(",");
+                Dsp.Diag d = null;
+                if (f.length == 5) {
+                    d = new Dsp.Diag();
+                    d.linErr = Double.parseDouble(f[1]);
+                    d.lowRel = Double.parseDouble(f[2]);
+                    d.highRel = Double.parseDouble(f[3]);
+                    d.snr = Double.parseDouble(f[4]);
+                }
+                items.add(new DiagItem(Integer.parseInt(f[0]), d));
+            }
+        } catch (RuntimeException e) {
+            items.clear();
+        }
+        return items;
+    }
+
+    private void renderDiag(List<DiagItem> items, int chosen) {
+        diagList.removeAllViews();
+        if (items.isEmpty()) return;
+        double bestLow = -1e9, bestHigh = -1e9;
+        for (DiagItem it : items) if (it.d != null) { bestLow = Math.max(bestLow, it.d.lowRel); bestHigh = Math.max(bestHigh, it.d.highRel); }
+        for (DiagItem it : items) {
+            boolean rec = it.src == chosen;
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(px(12), px(10), px(12), px(10));
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(px(12));
+            g.setColor(rec ? 0xFFFFF1EF : it.d == null ? BG : CARD);
+            g.setStroke(px(rec ? 2 : 1), rec ? ACC : LINE);
+            box.setBackground(g);
+            LinearLayout head = new LinearLayout(this);
+            head.setOrientation(LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.addView(text(AudioEngine.sourceName(it.src), 16, it.d == null ? MUT : INK, true),
+                    new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            if (rec) head.addView(pill("추천 · 사용 중", ACC));
+            box.addView(head);
+            if (it.d == null) {
+                box.addView(text("이 기기에서 쓸 수 없는 방식", 13, MUT, false));
+            } else {
+                boolean agc = it.d.linErr > 1.5;
+                box.addView(metric("자동 음량 조절", agc ? "있음" : "없음", String.format(Locale.US, "오차 %.1fdB", it.d.linErr), agc ? ACC : OK));
+                box.addView(metric("저음 보존", keep(it.d.lowRel - bestLow), null, lvl(it.d.lowRel - bestLow)));
+                box.addView(metric("고음 보존", keep(it.d.highRel - bestHigh), null, lvl(it.d.highRel - bestHigh)));
+                int sc = it.d.snr >= 40 ? OK : it.d.snr >= 25 ? WARN : ACC;
+                box.addView(metric("신뢰도", it.d.snr >= 40 ? "높음" : it.d.snr >= 25 ? "보통" : "낮음", Math.round(it.d.snr) + "dB", sc));
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = px(8);
+            diagList.addView(box, lp);
+        }
+        TextView note = text("저음·고음 보존은 가장 좋은 방식과 비교한 차이입니다. 자동 음량 조절이 없고 저음을 가장 잘 지키는 방식을 추천합니다.", 12, MUT, false);
+        note.setPadding(0, px(8), 0, 0);
+        diagList.addView(note);
+    }
+
+    private static String keep(double rel) {
+        return rel >= -1 ? "가장 좋음" : String.format(Locale.US, "%.1fdB 손실", -rel);
+    }
+
+    private static int lvl(double rel) {
+        return rel >= -1.5 ? OK : rel >= -4 ? WARN : ACC;
+    }
+
+    private View metric(String label, String val, String sub, int color) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, px(7), 0, 0);
+        View dot = new View(this);
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        dot.setBackground(d);
+        LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(px(8), px(8));
+        dl.rightMargin = px(10);
+        row.addView(dot, dl);
+        row.addView(text(label, 14, MUT, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (sub != null) row.addView(text(sub + "   ", 12, MUT, false));
+        row.addView(text(val, 14, color, true));
+        return row;
+    }
+
+    private TextView pill(String s, int color) {
+        TextView t = text(s, 12, 0xFFFFFFFF, true);
+        t.setPadding(px(10), px(3), px(10), px(3));
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(px(20));
+        g.setColor(color);
+        t.setBackground(g);
+        return t;
+    }
+
+    private void setEqNote(int[] g) {
+        int mi = 0;
+        for (int i = 0; i < g.length; i++) if (Math.abs(g[i]) > Math.abs(g[mi])) mi = i;
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        append(sb, "■ ", EqView.UP);
+        sb.append("올리기     ");
+        append(sb, "■ ", EqView.DOWN);
+        sb.append("내리기\n");
+        if (g[mi] == 0) sb.append("목표 곡선에 가깝습니다. 지금 EQ 설정을 그대로 두세요.");
+        else sb.append("가장 먼저 손볼 대역: ").append(fmtF(Dsp.EQ_BANDS[mi])).append(" ").append(signed(g[mi])).append("dB");
+        sb.append("\n16kHz는 휴대폰 마이크 한계로 참고만 하세요.");
+        eqNote.setText(sb);
     }
 
     private void onRun() {
@@ -453,7 +589,8 @@ public class MainActivity extends Activity {
         grade.setText("측정 전");
         count.setText("휴대폰을 귀 높이에 두고 측정하세요");
         details.setText("측정 후 표시됩니다.");
-        eq.setText("");
+        eqView.setGains(null);
+        eqNote.setText("");
         setStatus(msg, false);
     }
 
@@ -499,16 +636,8 @@ public class MainActivity extends Activity {
         for (String n : notes) s.append(n).append("\n");
         details.setText(s.toString().trim());
 
-        StringBuilder e = new StringBuilder();
-        for (int i = 0; i < Dsp.EQ_BANDS.length; i++) {
-            int g = r.eqGain[i];
-            String band = fmtF(Dsp.EQ_BANDS[i]);
-            e.append(String.format(Locale.US, "%-7s %+3d dB  ", band, g));
-            int n = Math.abs(g);
-            for (int j = 0; j < n; j++) e.append(g > 0 ? "▲" : "▼");
-            e.append("\n");
-        }
-        eq.setText(e.toString().trim());
+        eqView.setGains(r.eqGain);
+        setEqNote(r.eqGain);
     }
 
     private String bar(String name, double v) {
