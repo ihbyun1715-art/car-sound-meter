@@ -91,6 +91,27 @@ public final class AudioEngine {
         }
     }
 
+    public static final double WAKE_SEC = 3.0;
+
+    /** 3초짜리 작은 잡음(스테레오 인터리브): 앞 0.3초 서서히 커지고, 마지막 1초 동안 사라진다 */
+    static float[] wakeSignal() {
+        int n = (int) (WAKE_SEC * FS), fin = (int) (0.3 * FS), fout = (int) (1.0 * FS), tail = (int) (0.3 * FS);
+        float[] out = new float[n * 2];
+        java.util.Random rnd = new java.util.Random(7);
+        double lp = 0;
+        for (int i = 0; i < n; i++) {
+            lp += 0.15 * (rnd.nextGaussian() - lp);
+            double g = 0.08;
+            if (i < fin) g *= i / (double) fin;
+            if (i > n - tail) g = 0;
+            else if (i > n - tail - fout) g *= (n - tail - i) / (double) fout;
+            float v = (float) (lp * g);
+            out[2 * i] = v;
+            out[2 * i + 1] = v;
+        }
+        return out;
+    }
+
     @SuppressLint("MissingPermission")
     static AudioRecord openRecorder(int source) {
         try {
@@ -187,10 +208,19 @@ public final class AudioEngine {
             got[0] = pos;
         });
         try {
+            // 블루투스·헤드유닛이 재생 시작 부분을 자르거나 서서히 키우는 문제를 피하려고
+            // 작은 예비 소리를 먼저 틀어 연결을 깨운 뒤 녹음을 시작한다
+            tr.play();
+            cb.on("스피커 연결을 깨우는 중… (작은 소리가 납니다)");
+            float[] wake = wakeSignal();
+            int ww = 0;
+            while (ww < wake.length) {
+                int n = tr.write(wake, ww, Math.min(8192, wake.length - ww), AudioTrack.WRITE_BLOCKING);
+                if (n < 0) throw new IllegalStateException("재생 오류 " + n);
+                ww += n;
+            }
             rec.startRecording();
             reader.start();
-            Thread.sleep(400);
-            tr.play();
             int w = 0, lastSec = -1;
             double dur = len / (double) FS;
             while (w < inter.length) {
