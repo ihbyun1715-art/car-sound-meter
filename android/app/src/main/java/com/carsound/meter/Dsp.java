@@ -19,36 +19,48 @@ public final class Dsp {
     static double log2(double x) { return Math.log(x) / Math.log(2); }
     static double clamp(double v) { return Math.max(0, Math.min(100, v)); }
 
-    /** 차량용 목표 곡선(하만 차량 타깃을 단순화한 근사), dB */
+    /**
+     * 기본 목표 곡선(dB). 하만의 청취실 선호 응답(완만하게 내려가는 고음)에서 출발해,
+     * 차량 선호도 연구(Dennis, AES 2015: 평탄 대비 저음 +13dB, 고음 -2dB)를 근사했다.
+     * 저음 쉘프의 정확한 꺾임 주파수는 공개 자료로 확인하지 못해 90Hz로 가정했다.
+     */
     public static double target(double f) {
-        return 8 / (1 + (f / 90) * (f / 90)) - (f > 1000 ? 1.2 * log2(f / 1000) : 0);
+        return 12 / (1 + (f / 90) * (f / 90)) - (f > 1000 ? 0.6 * log2(f / 1000) : 0);
     }
 
     /** 듣는 사람의 취향: 기본 목표 곡선에 더할 네 가지 조절값(dB)과 채점 가중치 */
     public static final class Pref {
-        public final String name;
+        public final String name, note;
+        public final boolean research;
         public double bass, lowMid, vocal, treble;
         public final double wBass, wVocal, wClar;
 
-        public Pref(String name, double bass, double lowMid, double vocal, double treble, double wBass, double wVocal, double wClar) {
+        public Pref(String name, double bass, double lowMid, double vocal, double treble, double wBass, double wVocal, double wClar,
+                    boolean research, String note) {
             this.name = name; this.bass = bass; this.lowMid = lowMid; this.vocal = vocal; this.treble = treble;
-            this.wBass = wBass; this.wVocal = wVocal; this.wClar = wClar;
+            this.wBass = wBass; this.wVocal = wVocal; this.wClar = wClar; this.research = research; this.note = note;
         }
 
         public Pref withValues(String newName, double b, double lm, double v, double t) {
-            return new Pref(newName, b, lm, v, t, wBass, wVocal, wClar);
+            return new Pref(newName, b, lm, v, t, wBass, wVocal, wClar, research, note);
         }
     }
 
-    /** 프리셋: 이름, 저음, 중저음, 보컬, 고음, 저음 가중치, 보컬 가중치, 깨끗함 가중치 */
+    /**
+     * 프리셋. 앞의 셋은 하만 헤드폰 연구의 청취자 유형(64% / 15% / 21%)을 차량 목표에 옮긴 것이고,
+     * 뒤의 넷은 연구 근거가 없는 장르 참고용이다.
+     * 순서: 이름, 저음, 중저음, 보컬, 고음, 저음 가중치, 보컬 가중치, 깨끗함 가중치
+     */
     public static final Pref[] PRESETS = {
-            new Pref("기본", 0, 0, 0, 0, 1, 1, 1),
-            new Pref("중저음 선호", 4, 2, 0, 0, 1.6, 1, 1),
-            new Pref("또렷한 보컬", 0, -2, 2, 1, 1, 1.8, 1),
-            new Pref("발라드", 1, 1, 1, -1, 1, 1.4, 1),
-            new Pref("락", 3, 0, -1, 2, 1.3, 1, 1.6),
-            new Pref("팝", 4, 0, 1, 1, 1.4, 1.2, 1),
+            new Pref("표준", 0, 0, 0, 0, 1, 1, 1, true, "하만 연구에서 청취자의 64%가 선호한 균형입니다."),
+            new Pref("저음 강조", 5, 0, 0, 0, 1.3, 1, 1, true, "청취자의 15%가 선호: 표준보다 저음 4~6dB 많게. 젊은 남성 비율이 높았습니다."),
+            new Pref("저음 절제", -2, 0, 0, 0, 1, 1, 1, true, "청취자의 21%가 선호: 표준보다 저음 2dB 적게. 여성·고령 청취자 비율이 높았습니다."),
+            new Pref("또렷한 보컬", 0, -2, 2, 1, 1, 1.8, 1, false, "장르 참고용(연구 근거 없음): 목소리 대역을 강조합니다."),
+            new Pref("발라드", 1, 1, 1, -1, 1, 1.4, 1, false, "장르 참고용(연구 근거 없음): 따뜻하고 부드럽게."),
+            new Pref("락", 3, 0, -1, 2, 1.3, 1, 1.6, false, "장르 참고용(연구 근거 없음): 펀치감 있는 V자형."),
+            new Pref("팝", 4, 0, 1, 1, 1.4, 1.2, 1, false, "장르 참고용(연구 근거 없음): 저음과 선명함을 함께."),
     };
+    public static final int RESEARCH_PRESETS = 3;
 
     static double bell(double f, double fc, double sigmaOct) {
         double x = log2(f / fc) / sigmaOct;
@@ -263,7 +275,7 @@ public final class Dsp {
         public final String name;
         public int p, raw;
         public double E, snr, thd;
-        /** 300Hz~3kHz를 목표 곡선에 맞춘 응답(dB) */
+        /** 300Hz~3kHz를 목표 곡선에 맞춘 응답(dB). 결과에서는 '현재 노브 기준' 응답 */
         public double[] n;
         /** 맞추기 전 원래 레벨(dB). 노브 학습처럼 절대 변화량이 필요할 때 쓴다 */
         public double[] rawDb;
@@ -276,33 +288,45 @@ public final class Dsp {
         public int fs;
         public double clip;
         public Channel[] ch;
+        /** 측정할 때의 차량 EQ 노브 값(저음, 중음, 고음) */
+        public int[] knobs = new int[3];
     }
 
     /** 목표에서 크게 벗어난 구간 */
     public static final class Issue {
-        /** 가장 크게 벗어난 주파수와 그 편차(dB) */
-        public final double f, v;
-        /** 구간 범위 */
-        public final double fLo, fHi;
-        /** 1/3옥타브보다 좁은 구간인지 */
-        public final boolean narrow;
-        /** 위치에 따라 크게 달라지는 구간인지 */
-        public final boolean posDep;
+        public final double f, v, fLo, fHi;
+        public final boolean narrow, posDep;
         Issue(double f, double v, double fLo, double fHi, boolean posDep) {
             this.f = f; this.v = v; this.fLo = fLo; this.fHi = fHi; this.posDep = posDep;
             this.narrow = log2(fHi / fLo) < 0.34;
         }
     }
 
+    /** 채점 조건 */
+    public static final class Opts {
+        /** 허용 범위(±dB). 이 안의 차이는 감점하지 않는다 */
+        public double tol = 2.5;
+        /** 믿을 수 있는 측정 범위 */
+        public double lo = 50, hi = 10000;
+        /** 학습한 노브 모양(1단계당 dB). 없으면 null */
+        public double[][] shapes;
+        /** 지금 차량 EQ 노브 값 */
+        public int[] cur = new int[3];
+    }
+
     /** 여러 측정을 합친 최종 결과 */
     public static final class Result {
-        public boolean lr;
+        public boolean lr, converted;
         public int count;
         public Channel[] ch;
-        public double clip, rms, fb, thd, snr, total, tone, bass, clar;
+        public double clip, rms, fb, thd, snr, total, tone, tiltScore, bass, clar;
+        /** 허용 범위를 넘은 양(가중 RMS, dB), 범위 안 비율(%), 기울기(dB/옥타브, +면 고음 쪽이 큼) */
+        public double excess, inBand, tilt;
         public double bal = Double.NaN, dly = Double.NaN, balScore = Double.NaN;
-        public double[] avg, dev, spread;
+        /** 현재 노브 기준 평균 응답·목표와의 차이, 노브 0으로 환산한 차이 */
+        public double[] avg, dev, devFlat, spread;
         public Pref pref;
+        public Opts opts;
         public final List<Issue> issues = new ArrayList<>();
         public final int[] eqGain = new int[EQ_BANDS.length];
     }
@@ -376,20 +400,45 @@ public final class Dsp {
         return n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2;
     }
 
-    /** 여러 위치에서 잰 측정을 평균 내고 점수를 매긴다 */
-    public static Result summarize(List<Meas> ms) {
-        return summarize(ms, null);
+    static double knobEffect(double[][] shapes, int[] k, int i) {
+        if (shapes == null || k == null) return 0;
+        double s = 0;
+        for (int j = 0; j < 3; j++) s += k[j] * shapes[j][i];
+        return s;
     }
 
-    /** 측정은 그대로 두고 취향(p)에 맞춘 목표 곡선으로 채점한다 */
+    /** 300Hz~3kHz 평균을 목표에 맞추는 이동량 */
+    static double alignShift(double[] avg, Pref p) {
+        double sh = 0; int c = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= 300 && FR[i] <= 3000) { sh += avg[i] - target(FR[i], p); c++; }
+        return sh / c;
+    }
+
+    public static Result summarize(List<Meas> ms) {
+        return summarize(ms, null, new Opts());
+    }
+
     public static Result summarize(List<Meas> ms, Pref p) {
+        return summarize(ms, p, new Opts());
+    }
+
+    /**
+     * 측정은 그대로 두고 취향(p)과 채점 조건(o)으로 채점한다.
+     * 노브 모양을 학습했다면 각 측정에서 그때의 노브 효과를 빼 '노브 0' 상태로 환산해 평균 내고,
+     * 지금 노브 값의 효과를 더해 '현재 노브 기준' 결과를 만든다.
+     */
+    public static Result summarize(List<Meas> ms, Pref p, Opts o) {
         Meas first = ms.get(0);
         int M = ms.size(), nc = first.ch.length;
         Result res = new Result();
         res.lr = first.lr;
         res.count = M;
         res.pref = p;
+        res.opts = o;
         res.ch = new Channel[nc];
+        boolean conv = o.shapes != null;
+        for (Meas m : ms) for (int k = 0; k < 3; k++) if (m.knobs[k] != o.cur[k]) res.converted = conv;
+        double[][] flatCh = new double[nc][];
         for (int c = 0; c < nc; c++) {
             Channel a = new Channel(first.ch[c].name, 0, 0);
             double[] pw = new double[NF], pr = new double[NF];
@@ -397,8 +446,9 @@ public final class Dsp {
             for (Meas m : ms) {
                 Channel x = m.ch[c];
                 for (int i = 0; i < NF; i++) {
-                    pw[i] += Math.pow(10, x.n[i] / 10);
-                    pr[i] += Math.pow(10, x.rawDb[i] / 10);
+                    double ke = conv ? knobEffect(o.shapes, m.knobs, i) : 0;
+                    pw[i] += Math.pow(10, (x.n[i] - ke) / 10);
+                    pr[i] += Math.pow(10, (x.rawDb[i] - ke) / 10);
                 }
                 a.E += x.E / M;
                 a.thd += x.thd / M;
@@ -406,42 +456,71 @@ public final class Dsp {
             }
             a.n = new double[NF];
             a.rawDb = new double[NF];
-            for (int i = 0; i < NF; i++) { a.n[i] = 10 * Math.log10(pw[i] / M); a.rawDb[i] = 10 * Math.log10(pr[i] / M); }
+            flatCh[c] = new double[NF];
+            for (int i = 0; i < NF; i++) {
+                flatCh[c][i] = 10 * Math.log10(pw[i] / M);
+                double ke = conv ? knobEffect(o.shapes, o.cur, i) : 0;
+                a.n[i] = flatCh[c][i] + ke;
+                a.rawDb[i] = 10 * Math.log10(pr[i] / M) + ke;
+            }
             res.ch[c] = a;
         }
         for (Meas m : ms) res.clip = Math.max(res.clip, m.clip);
 
-        // 위치 간 편차폭(첫 채널 기준)
         res.spread = new double[NF];
         if (M > 1) for (int i = 0; i < NF; i++) {
             double lo = 1e9, hi = -1e9;
-            for (Meas m : ms) { lo = Math.min(lo, m.ch[0].n[i]); hi = Math.max(hi, m.ch[0].n[i]); }
+            for (Meas m : ms) {
+                double v = m.ch[0].n[i] - (conv ? knobEffect(o.shapes, m.knobs, i) : 0);
+                lo = Math.min(lo, v); hi = Math.max(hi, v);
+            }
             res.spread[i] = hi - lo;
         }
 
         res.avg = new double[NF];
-        double[] dev = new double[NF];
+        double[] avgFlat = new double[NF];
         for (int i = 0; i < NF; i++) {
-            double s = 0;
-            for (Channel c : res.ch) s += c.n[i];
+            double s = 0, sf = 0;
+            for (int c = 0; c < nc; c++) { s += res.ch[c].n[i]; sf += flatCh[c][i]; }
             res.avg[i] = s / nc;
+            avgFlat[i] = sf / nc;
         }
-        // 취향 목표 곡선에 맞춰 300Hz~3kHz 평균 레벨을 다시 맞춘다
-        double sh = 0; int shc = 0;
-        for (int i = 0; i < NF; i++) if (FR[i] >= 300 && FR[i] <= 3000) { sh += res.avg[i] - target(FR[i], p); shc++; }
-        sh /= shc;
+        double sh = alignShift(res.avg, p), shf = alignShift(avgFlat, p);
+        double[] dev = new double[NF];
+        res.devFlat = new double[NF];
         for (int i = 0; i < NF; i++) {
             res.avg[i] -= sh;
             for (Channel c : res.ch) c.n[i] -= sh;
             dev[i] = res.avg[i] - target(FR[i], p);
+            res.devFlat[i] = avgFlat[i] - shf - target(FR[i], p);
         }
         res.dev = dev;
-        double s = 0, cnt = 0;
-        for (int i = 0; i < NF; i++) if (FR[i] >= 50 && FR[i] <= 12000) { double w = weight(FR[i], p); s += w * dev[i] * dev[i]; cnt += w; }
-        res.rms = Math.sqrt(s / cnt);
 
-        // 저음 한계: 좁은 골 하나가 아니라, 1/3옥타브 평활 곡선이 목표보다 6dB 넘게
-        // 낮아진 상태가 그 아래로 1/3옥타브 이상 이어지는 지점
+        // 허용 범위 기반 채점: ±tol 안은 감점 없음, 봉우리는 골보다 무겁게, 1/6옥타브 평활
+        double[] e = smooth(dev, 1 / 6.0);
+        double s2 = 0, ws = 0, rs = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+        int in = 0, tot = 0;
+        for (int i = 0; i < NF; i++) {
+            double f = FR[i];
+            if (f < o.lo || f > o.hi) continue;
+            double w = weight(f, p), ae = Math.abs(e[i]);
+            double ex = Math.max(0, ae - o.tol) * (e[i] > 0 ? 1.0 : 0.6);
+            s2 += w * ex * ex;
+            rs += w * dev[i] * dev[i];
+            ws += w;
+            if (ae <= o.tol) in++;
+            tot++;
+            double x = log2(f / 1000);
+            sx += w * x; sy += w * e[i]; sxx += w * x * x; sxy += w * x * e[i];
+        }
+        res.excess = Math.sqrt(s2 / ws);
+        res.rms = Math.sqrt(rs / ws);
+        res.inBand = 100.0 * in / Math.max(tot, 1);
+        res.tilt = (ws * sxy - sx * sy) / (ws * sxx - sx * sx);
+        res.tone = clamp(100 - 20 * res.excess);
+        res.tiltScore = clamp(100 - 40 * Math.max(0, Math.abs(res.tilt) - 0.3));
+
+        // 저음 한계: 1/3옥타브 평활 곡선이 목표보다 6dB 넘게 낮은 상태가 그 아래로 이어지는 지점
         double[] devS = smooth(dev, 1 / 3.0);
         res.fb = 20;
         for (int i = NF - 1; i >= 0; i--) {
@@ -454,7 +533,6 @@ public final class Dsp {
 
         res.thd = 0; res.snr = Double.MAX_VALUE;
         for (Channel c : res.ch) { res.thd = Math.max(res.thd, c.thd); res.snr = Math.min(res.snr, c.snr); }
-        res.tone = clamp(100 - (res.rms - 2) * 12);
         res.bass = clamp(100 - log2(Math.max(res.fb, 35) / 35) * 55);
         res.clar = clamp(100 - (res.thd - 1) * 12);
         if (res.lr) {
@@ -468,17 +546,17 @@ public final class Dsp {
             res.balScore = clamp(100 - (Math.abs(res.bal) - 1) * 15);
         }
         double wb = p == null ? 1 : p.wBass, wc = p == null ? 1 : p.wClar;
-        if (res.lr) {
-            res.total = (0.45 * res.tone + 0.25 * wb * res.bass + 0.15 * wc * res.clar + 0.15 * res.balScore) / (0.45 + 0.25 * wb + 0.15 * wc + 0.15);
-        } else {
-            res.total = (0.5 * res.tone + 0.3 * wb * res.bass + 0.2 * wc * res.clar) / (0.5 + 0.3 * wb + 0.2 * wc);
-        }
+        double num = 0.35 * res.tone + 0.2 * res.tiltScore + 0.25 * wb * res.bass + 0.2 * wc * res.clar;
+        double den = 0.35 + 0.2 + 0.25 * wb + 0.2 * wc;
+        if (res.lr) { num += 0.15 * res.balScore; den += 0.15; }
+        res.total = num / den;
 
-        // 목표에서 크게 벗어난 구간(범위, 폭, 위치 의존성 포함)
+        // 목표에서 크게 벗어난 구간(믿을 수 있는 범위 안에서만)
         int start = -1; double rf = 0, rv = 0;
+        double fmax = Math.min(12000, o.hi);
         for (int i = 0; i <= NF; i++) {
             double f = i < NF ? FR[i] : 0, v = i < NF ? dev[i] : 0;
-            boolean bad = i < NF && f >= 40 && f <= 12000 && (v > 5 || v < -6);
+            boolean bad = i < NF && f >= 40 && f <= fmax && (v > 5 || v < -6);
             boolean same = bad && start >= 0 && Math.signum(v) == Math.signum(rv);
             if (start >= 0 && !same) {
                 double sp = 0;
@@ -491,9 +569,9 @@ public final class Dsp {
             else if (bad && Math.abs(v) > Math.abs(rv)) { rf = f; rv = v; }
         }
 
-        // 9밴드 제안: 대역 안의 중앙값을 써서 좁은 골·봉우리에 휘둘리지 않게 하고,
-        // 올리기는 +3dB까지만 (꺼진 골은 EQ로 잘 메워지지 않음)
+        // 9밴드 제안(현재 상태에서 바꿀 양): 대역 중앙값, 올리기는 +3dB까지, 믿을 수 없는 대역은 0
         for (int b = 0; b < EQ_BANDS.length; b++) {
+            if (EQ_BANDS[b] > o.hi) { res.eqGain[b] = 0; continue; }
             List<Double> v = new ArrayList<>();
             for (int i = 0; i < NF; i++)
                 if (FR[i] >= EQ_BANDS[b] / Math.sqrt(2) && FR[i] <= EQ_BANDS[b] * Math.sqrt(2)) v.add(dev[i]);
@@ -518,56 +596,83 @@ public final class Dsp {
         return s;
     }
 
-    /** 노브 추천 결과 */
+    /** 노브 추천 결과. target은 권장 '설정값'(현재 값이 아니라 최종 위치) */
     public static final class KnobFit {
-        public final int[] steps = new int[3];
-        public double rmsBefore, rmsAfter;
+        public final int[] target = new int[3];
+        public final int[] cur = new int[3];
+        public double rmsNow, rmsAfter;
+        public boolean learned, trebleFixed;
+
+        /** 바꿔도 나아질 게 거의 없으면 true */
+        public boolean hold() {
+            boolean small = true;
+            for (int k = 0; k < 3; k++) if (Math.abs(target[k] - cur[k]) > 1) small = false;
+            return small || rmsNow - rmsAfter < 0.5;
+        }
+    }
+
+    static double alignedRms(double[] d, double[] w, Pref p, double lo, double hi) {
+        double m = 0, sw = 0;
+        for (int i = 0; i < NF; i++) if (w[i] > 0) { m += w[i] * d[i]; sw += w[i]; }
+        m /= sw;
+        double s = 0, c = 0;
+        for (int i = 0; i < NF; i++) {
+            double f = FR[i];
+            if (f < lo || f > hi) continue;
+            double ww = weight(f, p);
+            s += ww * (d[i] - m) * (d[i] - m);
+            c += ww;
+        }
+        return Math.sqrt(s / c);
     }
 
     /**
-     * 각 노브의 모양(shapes[k], 1단계당 dB)을 써서, 목표와의 차이가 가장 작아지는
-     * 노브 단계를 최소자승으로 구한다. 좁은 골·위치 편차가 큰 대역은 덜 반영한다.
+     * 목표와의 차이가 가장 작아지는 노브 설정값을 최소자승으로 구한다.
+     * 학습한 모양이 있으면 '노브 0' 환산 응답에서 절대 설정값을, 없으면 현재 상태에서의 변화량을 구해
+     * 현재 값에 더한다. 믿을 수 없는 대역과 위치 편차가 큰 대역은 덜 반영한다.
      */
-    public static KnobFit fitKnobs(Result r, double[][] shapes, int maxStep) {
-        double[] dev = smooth(r.dev, 1 / 3.0);
+    public static KnobFit fitKnobs(Result r, double[][] shapes, boolean learned, int maxStep) {
+        Opts o = r.opts;
         int K = 3, V = K + 1;
+        // 고음을 믿을 수 없으면(측정 상한이 8kHz 미만) 고음 노브는 지금 값에 고정하고 저음·중음만 맞춘다
+        boolean fixTreble = o.hi < 8000;
+        double[] base = smooth(learned ? r.devFlat : r.dev, 1 / 3.0);
+        if (fixTreble && learned) for (int i = 0; i < NF; i++) base[i] += o.cur[2] * shapes[2][i];
         double[][] A = new double[V][V];
         double[] B = new double[V];
         double[] w = new double[NF];
         for (int i = 0; i < NF; i++) {
             double f = FR[i];
-            if (f < 40 || f > 12000) continue;
-            w[i] = weight(f, r.pref) / (1 + r.spread[i] / 3) * (f > 10000 ? 0.3 : 1);
-            double[] x = {shapes[0][i], shapes[1][i], shapes[2][i], 1};
+            if (f < Math.max(40, o.lo - 10) || f > Math.min(12000, o.hi)) continue;
+            w[i] = weight(f, r.pref) / (1 + r.spread[i] / 3);
+            double[] x = {shapes[0][i], shapes[1][i], fixTreble ? 0 : shapes[2][i], 1};
             for (int a = 0; a < V; a++) {
-                B[a] += w[i] * x[a] * (-dev[i]);
+                B[a] += w[i] * x[a] * (-base[i]);
                 for (int b = 0; b < V; b++) A[a][b] += w[i] * x[a] * x[b];
             }
         }
         for (int a = 0; a < V; a++) A[a][a] += 1e-6 + (a < K ? 0.02 * A[a][a] : 0);
         double[] g = solve(A, B);
         KnobFit kf = new KnobFit();
-        for (int k = 0; k < K; k++) kf.steps[k] = (int) Math.max(-maxStep, Math.min(maxStep, Math.round(g[k])));
-        // 반올림한 값으로 전후 편차 계산 (전체 레벨은 다시 맞춤)
-        double sb = 0, sa = 0, sw = 0, mean = 0;
-        double[] after = new double[NF];
-        for (int i = 0; i < NF; i++) {
-            after[i] = r.dev[i];
-            for (int k = 0; k < K; k++) after[i] += kf.steps[k] * shapes[k][i];
-            if (w[i] > 0) { mean += w[i] * after[i]; sw += w[i]; }
+        kf.learned = learned;
+        kf.trebleFixed = fixTreble;
+        for (int k = 0; k < K; k++) {
+            kf.cur[k] = o.cur[k];
+            double t = (k == 2 && fixTreble) ? o.cur[k] : learned ? g[k] : o.cur[k] + g[k];
+            kf.target[k] = (int) Math.max(-maxStep, Math.min(maxStep, Math.round(t)));
         }
-        mean /= sw;
-        double cw = 0;
+        double[] now = new double[NF], after = new double[NF];
         for (int i = 0; i < NF; i++) {
-            double f = FR[i];
-            if (f < 50 || f > 12000) continue;
-            double ww = weight(f, r.pref);
-            sb += ww * r.dev[i] * r.dev[i];
-            sa += ww * (after[i] - mean) * (after[i] - mean);
-            cw += ww;
+            now[i] = r.dev[i];
+            if (learned) after[i] = r.devFlat[i] + knobEffect(shapes, kf.target, i);
+            else {
+                after[i] = r.dev[i];
+                for (int k = 0; k < K; k++) after[i] += (kf.target[k] - kf.cur[k]) * shapes[k][i];
+            }
         }
-        kf.rmsBefore = Math.sqrt(sb / cw);
-        kf.rmsAfter = Math.sqrt(sa / cw);
+        double hi = Math.min(12000, o.hi);
+        kf.rmsNow = alignedRms(now, w, r.pref, o.lo, hi);
+        kf.rmsAfter = alignedRms(after, w, r.pref, o.lo, hi);
         return kf;
     }
 
@@ -602,5 +707,41 @@ public final class Dsp {
         double[] d = new double[NF];
         for (int i = 0; i < NF; i++) d[i] = (knobRaw[i] - baseRaw[i]) / steps;
         return smooth(d, 1 / 3.0);
+    }
+
+    /** 학습한 노브 모양 요약과 유효성 */
+    public static final class KnobInfo {
+        public double peak, peakF, lo, hi, leak;
+        public boolean valid;
+        public String problem = "";
+    }
+
+    static double meanAbs(double[] s, double lo, double hi) {
+        double t = 0; int c = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= lo && FR[i] <= hi) { t += Math.abs(s[i]); c++; }
+        return c == 0 ? 0 : t / c;
+    }
+
+    public static KnobInfo knobInfo(double[] s, int k) {
+        KnobInfo ki = new KnobInfo();
+        int pi = 0;
+        for (int i = 0; i < NF; i++) if (FR[i] >= 30 && FR[i] <= 16000 && s[i] > s[pi]) pi = i;
+        ki.peak = s[pi];
+        ki.peakF = FR[pi];
+        int a = pi, b = pi;
+        while (a > 0 && s[a - 1] >= ki.peak / 2) a--;
+        while (b < NF - 1 && s[b + 1] >= ki.peak / 2) b++;
+        ki.lo = FR[a];
+        ki.hi = FR[b];
+        double pk = Math.max(Math.abs(ki.peak), 1e-6);
+        if (k == 0) ki.leak = meanAbs(s, 1000, 5000) / pk;
+        else if (k == 1) ki.leak = (meanAbs(s, 40, 60) + meanAbs(s, 8000, 10000)) / 2 / pk;
+        else ki.leak = meanAbs(s, 60, 300) / pk;
+        boolean place = k == 0 ? ki.peakF < 400 : k == 1 ? (ki.peakF >= 150 && ki.peakF <= 6000) : ki.peakF >= 1500;
+        if (ki.peak < 0.3) ki.problem = "노브 효과가 거의 측정되지 않았습니다. 노브를 +5로 바꾸지 않았거나 볼륨이 바뀌었을 수 있습니다.";
+        else if (!place) ki.problem = "예상과 다른 대역이 움직였습니다. 다른 노브를 바꿨거나 휴대폰 위치가 바뀌었을 수 있습니다.";
+        else if (ki.leak > 0.35) ki.problem = "담당하지 않는 대역까지 함께 바뀌었습니다. 학습 중 휴대폰 위치나 볼륨이 바뀌었을 수 있습니다.";
+        ki.valid = ki.problem.isEmpty();
+        return ki;
     }
 }
