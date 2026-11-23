@@ -163,9 +163,102 @@ public class MainActivity extends Activity {
         updateLearnUi();
         applyPrefToUi();
         updateInfo(false);
-        renderHistory();
         clearResult("");
+        if (loadSession()) {
+            render(Dsp.summarize(session, pref, opts()));
+            setStatus("지난번 측정(" + session.size() + "곳)을 불러왔습니다. 이어서 측정하면 평균에 더해집니다.", false);
+        }
+        renderHistory();
         updateSteps();
+    }
+
+    // ---------- 진행 중인 측정 보관 (앱을 다시 켜도 결과·공유 유지) ----------
+
+    private static String csv(double[] v) {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < v.length; i++) { if (i > 0) s.append(','); s.append(String.format(Locale.US, "%.3f", v[i])); }
+        return s.toString();
+    }
+
+    private static double[] uncsv(String s) {
+        String[] f = s.split(",");
+        if (f.length != Dsp.NF) throw new IllegalArgumentException("len");
+        double[] v = new double[Dsp.NF];
+        for (int i = 0; i < Dsp.NF; i++) v[i] = Double.parseDouble(f[i]);
+        return v;
+    }
+
+    private void saveSession() {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("id", sessionId);
+            JSONArray ms = new JSONArray();
+            for (Dsp.Meas m : session) {
+                JSONObject o = new JSONObject();
+                o.put("lr", m.lr);
+                o.put("fs", m.fs);
+                o.put("clip", m.clip);
+                o.put("knobs", m.knobs[0] + "," + m.knobs[1] + "," + m.knobs[2]);
+                JSONArray chs = new JSONArray();
+                for (Dsp.Channel c : m.ch) {
+                    JSONObject co = new JSONObject();
+                    co.put("name", c.name);
+                    co.put("p", c.p);
+                    co.put("raw", c.raw);
+                    co.put("E", c.E);
+                    co.put("snr", c.snr);
+                    co.put("thd", c.thd);
+                    co.put("n", csv(c.n));
+                    co.put("db", csv(c.rawDb));
+                    chs.put(co);
+                }
+                o.put("ch", chs);
+                ms.put(o);
+            }
+            root.put("ms", ms);
+            store.edit().putString("session", root.toString()).apply();
+        } catch (Exception ignored) { }
+    }
+
+    private boolean loadSession() {
+        String s = store.getString("session", "");
+        if (s.isEmpty()) return false;
+        try {
+            JSONObject root = new JSONObject(s);
+            JSONArray ms = root.getJSONArray("ms");
+            List<Dsp.Meas> out = new ArrayList<>();
+            for (int i = 0; i < ms.length(); i++) {
+                JSONObject o = ms.getJSONObject(i);
+                Dsp.Meas m = new Dsp.Meas();
+                m.lr = o.getBoolean("lr");
+                m.fs = o.getInt("fs");
+                m.clip = o.getDouble("clip");
+                String[] k = o.getString("knobs").split(",");
+                for (int j = 0; j < 3; j++) m.knobs[j] = Integer.parseInt(k[j]);
+                JSONArray chs = o.getJSONArray("ch");
+                m.ch = new Dsp.Channel[chs.length()];
+                for (int j = 0; j < chs.length(); j++) {
+                    JSONObject co = chs.getJSONObject(j);
+                    Dsp.Channel c = new Dsp.Channel(co.getString("name"), co.getInt("p"), co.getInt("raw"));
+                    c.E = co.getDouble("E");
+                    c.snr = co.getDouble("snr");
+                    c.thd = co.getDouble("thd");
+                    c.n = uncsv(co.getString("n"));
+                    c.rawDb = uncsv(co.getString("db"));
+                    m.ch[j] = c;
+                }
+                out.add(m);
+            }
+            if (out.isEmpty()) return false;
+            modeLr.setChecked(out.get(0).lr);
+            session.clear();
+            session.addAll(out);
+            sessionId = root.getLong("id");
+            return true;
+        } catch (Exception e) {
+            store.edit().remove("session").apply();
+            return false;
+        }
     }
 
     // ================= 단계 카드 =================
@@ -357,6 +450,7 @@ public class MainActivity extends Activity {
     private void newSession(String msg) {
         session.clear();
         sessionId = 0;
+        store.edit().remove("session").apply();
         clearResult(msg);
         updateSteps();
     }
@@ -431,24 +525,35 @@ public class MainActivity extends Activity {
         return n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2;
     }
 
-    /** 유효한 방식들의 공통값(중앙값)에 가장 가까운 방식을 고르고, 방식끼리 크게 다른 대역을 '신뢰 낮음'으로 표시한다 */
+    static final int UNPROCESSED = 9;
+
+    /** 공통값 계산에 쓸 방식: 음량 자동 조절이 없는 방식이 2개 이상이면 그것만, 아니면 유효한 방식 전부 */
+    static List<DiagItem> pool(List<DiagItem> items) {
+        List<DiagItem> v = new ArrayList<>(), c = new ArrayList<>();
+        for (DiagItem it : items) if (it.valid()) { v.add(it); if (it.d.linErr <= 1.5) c.add(it); }
+        return c.size() >= 2 ? c : v;
+    }
+
+    /** 공통값(중앙값)에 가장 가까운 방식을 고르고, 방식끼리 크게 다른 대역을 '신뢰 낮음'으로 표시한다. 가공 없음이 공통값과 맞으면 우선한다 */
     private int chooseSource(List<DiagItem> items) {
+        List<DiagItem> p = pool(items);
+        if (p.isEmpty()) return -1;
         List<Double> lows = new ArrayList<>(), highs = new ArrayList<>();
-        boolean allComp = true;
-        int nv = 0;
-        for (DiagItem it : items) if (it.valid()) { lows.add(it.d.lowRel); highs.add(it.d.highRel); if (it.d.linErr <= 1.5) allComp = false; nv++; }
-        if (nv == 0) return -1;
+        for (DiagItem it : p) { lows.add(it.d.lowRel); highs.add(it.d.highRel); }
         double ml = median(lows), mh = median(highs);
         int best = -1;
         double bs = 1e9;
-        for (DiagItem it : items) {
-            if (!it.valid()) continue;
+        for (DiagItem it : p) {
             double s = Math.abs(it.d.lowRel - ml) + Math.abs(it.d.highRel - mh) + 0.3 * it.d.linErr;
+            if (it.src == UNPROCESSED && Math.abs(it.d.lowRel - ml) <= 3 && Math.abs(it.d.highRel - mh) <= 3) s = -1;
             if (s < bs) { bs = s; best = it.src; }
         }
-        hfUnreliable = nv < 2 || Collections.max(highs) - Collections.min(highs) > 6;
-        lfUnreliable = nv >= 2 && Collections.max(lows) - Collections.min(lows) > 6;
-        chainComp = nv >= 2 && allComp;
+        int nv = 0;
+        boolean anyClean = false;
+        for (DiagItem it : items) if (it.valid()) { nv++; if (it.d.linErr <= 1.5) anyClean = true; }
+        hfUnreliable = p.size() < 2 || Collections.max(highs) - Collections.min(highs) > 6;
+        lfUnreliable = p.size() >= 2 && Collections.max(lows) - Collections.min(lows) > 6;
+        chainComp = nv >= 2 && !anyClean;
         return best;
     }
 
@@ -492,10 +597,17 @@ public class MainActivity extends Activity {
         else setDiagStatus("아직 진단하지 않았습니다. 측정 전에 먼저 진단해 주세요.", ACC);
         diagMore.setVisibility(items.isEmpty() ? View.GONE : View.VISIBLE);
         if (items.isEmpty()) { diagSummary.setText(""); return; }
+        List<DiagItem> p = pool(items);
         List<Double> lows = new ArrayList<>(), highs = new ArrayList<>();
-        for (DiagItem it : items) if (it.valid()) { lows.add(it.d.lowRel); highs.add(it.d.highRel); }
+        for (DiagItem it : p) { lows.add(it.d.lowRel); highs.add(it.d.highRel); }
         double ml = median(lows), mh = median(highs);
         SpannableStringBuilder sb = new SpannableStringBuilder();
+        StringBuilder excl = new StringBuilder();
+        for (DiagItem it : items) if (it.valid() && !p.contains(it)) excl.append(excl.length() > 0 ? "·" : "").append(AudioEngine.sourceName(it.src));
+        if (excl.length() > 0) {
+            append(sb, "• " + excl + "  ", MUT);
+            sb.append("음량 자동 조절(가공)이 있어 비교에서 뺐습니다.\n");
+        }
         if (!highs.isEmpty()) {
             double hs = Collections.max(highs) - Collections.min(highs);
             if (hfUnreliable) {
@@ -519,6 +631,7 @@ public class MainActivity extends Activity {
         diagSummary.setText(sb);
         for (DiagItem it : items) {
             boolean rec = it.src == chosen || (chosen < 0 && it.src == AudioEngine.chosenSource);
+            boolean out = it.valid() && !p.contains(it);
             LinearLayout box = vbox();
             box.setPadding(px(12), px(10), px(12), px(10));
             GradientDrawable g = new GradientDrawable();
@@ -531,6 +644,7 @@ public class MainActivity extends Activity {
             head.setGravity(Gravity.CENTER_VERTICAL);
             head.addView(text(AudioEngine.sourceName(it.src), 16, it.d == null ? MUT : INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             if (rec) head.addView(pill("선택 · 사용 중", ACC));
+            else if (out) head.addView(pill("가공 감지 · 제외", WARN));
             box.addView(head);
             if (it.d == null) box.addView(text("이 기기에서 쓸 수 없는 방식", 13, MUT, false));
             else if (!it.valid()) box.addView(metric("결과", "무효", "신호가 제대로 녹음되지 않음", ACC));
@@ -547,7 +661,7 @@ public class MainActivity extends Activity {
             l.topMargin = px(8);
             diagList.addView(box, l);
         }
-        TextView note = text("공통값은 유효한 방식들의 중앙값입니다. 한 방식만 저음이나 고음을 크게 다르게 잡는다면 그 방식이 소리를 가공하고 있다는 뜻입니다.", 12, MUT, false);
+        TextView note = text("공통값은 가공이 없는 방식들의 중앙값입니다. '가공 없음'이 공통값과 3dB 안으로 맞으면 우선 선택합니다. 한 방식만 저음이나 고음을 크게 다르게 잡는다면 그 방식이 소리를 가공하고 있다는 뜻입니다.", 12, MUT, false);
         note.setPadding(0, px(8), 0, 0);
         diagList.addView(note);
     }
@@ -785,6 +899,7 @@ public class MainActivity extends Activity {
                     if (sessionId == 0) sessionId = System.currentTimeMillis();
                     render(Dsp.summarize(session, pref, opts()));
                     saveRecord();
+                    saveSession();
                     setStatus("측정 완료 (" + session.size() + "곳, 기록에 저장됨) · 위치를 조금 옮겨 한 번 더 재면 평균이 더 정확해집니다", false);
                     setBusy(false);
                     updateInfo(true);
@@ -924,6 +1039,7 @@ public class MainActivity extends Activity {
         if (AudioEngine.lastOutputIsPhoneSpeaker) warns.add("소리가 휴대폰 스피커로 나왔습니다. 차량에 연결한 뒤 다시 측정하세요.");
         if (AudioEngine.lastInputNotBuiltin) warns.add("내장 마이크가 아닌 다른 입력이 쓰였습니다. 측정 환경을 확인하세요.");
         if (r.clip > 0.98) warns.add("마이크 입력이 넘쳤습니다. 볼륨을 조금 낮추고 다시 재세요.");
+        if (r.thd > 5) warns.add("찌그러짐이 " + f1(r.thd) + "%로 비정상적으로 큽니다. 볼륨이 너무 크거나 측정 중 휴대폰·물건이 떨렸을 수 있습니다. 볼륨을 낮추고 휴대폰을 고정한 뒤 다시 재세요.");
         if (r.snr < 20) warns.add("신호가 소음에 묻혀 결과를 믿기 어렵습니다. 볼륨을 올리거나 시동을 끄고 다시 재세요.");
         double maxSpread = 0;
         for (int i = 0; i < Dsp.NF; i++) if (Dsp.FR[i] >= 100 && Dsp.FR[i] <= 3000) maxSpread = Math.max(maxSpread, r.spread[i]);
@@ -938,7 +1054,7 @@ public class MainActivity extends Activity {
         int il = at <= 0.3 ? 0 : at <= 0.6 ? 1 : at <= 1.0 ? 2 : 3;
         addMetric("전체 기울기", LV[il], lvColor(il), r.tiltScore,
                 at <= 0.3 ? "한쪽으로 기울지 않았습니다 (" + signedD(r.tilt) + "dB/옥타브)"
-                        : (r.tilt > 0 ? "고음 쪽이 커서 밝고 날카로운 편" : "저음 쪽이 커서 어둡고 답답한 편") + " (" + signedD(r.tilt) + "dB/옥타브)",
+                        : (r.tilt > 0 ? "고음 쪽이 커서 밝고 날카로운 편" : "저음 쪽이 커서 어둡고 답답한 편") + " (" + signedD(r.tilt) + "dB/옥타브)\n" + tiltCause(r),
                 "저음에서 고음까지 소리 전체가 한쪽으로 기울었는지 봅니다. 하만의 선호도 예측 모델에서도 이 기울기가 핵심 요인이었습니다. ±0.3dB/옥타브 이내면 균형이 좋습니다.");
         int bl = r.fb <= 40 ? 0 : r.fb <= 60 ? 1 : r.fb <= 90 ? 2 : 3;
         addMetric("저음 깊이", LV[bl], lvColor(bl), r.bass,
@@ -972,6 +1088,18 @@ public class MainActivity extends Activity {
         TextView g = text("그래프에서 빨간 선이 초록 띠(목표 범위)보다 위에 있으면 그 소리가 크게, 아래에 있으면 작게 들린다는 뜻입니다.", 12, MUT, false);
         g.setPadding(0, px(10), 0, 0);
         detailBox.addView(g);
+    }
+
+    /** 기울기의 원인: 대역별로 목표보다 얼마나 크거나 작은지 */
+    private String tiltCause(Dsp.Result r) {
+        double top = Math.min(r.opts.hi, 10000);
+        double lo = Dsp.bandMean(r.dev, Math.max(50, r.opts.lo), 200), mid = Dsp.bandMean(r.dev, 300, 2000), hi = Dsp.bandMean(r.dev, 2000, top);
+        String s = "목표 대비 저음역(~200Hz) " + signedD(lo) + "dB · 중역 " + signedD(mid) + "dB · 고음역(2k~" + fmtF(top) + ") " + signedD(hi) + "dB";
+        if (Math.abs(r.tilt) > 0.3) {
+            if (r.tilt < 0) s += lo > -hi ? "\n→ 주로 저음이 많아서 어둡습니다." : "\n→ 주로 고음이 부족해서 어둡습니다.";
+            else s += hi > -lo ? "\n→ 주로 고음이 많아서 밝습니다." : "\n→ 주로 저음이 부족해서 밝습니다.";
+        }
+        return s;
     }
 
     private void addMetric(String title, String verdict, int color, double scoreV, String value, String meaning) {
@@ -1531,6 +1659,29 @@ public class MainActivity extends Activity {
                 s.append("\n");
             } catch (Exception ignored) { }
         }
+        // 최근 기록(최대 8개)의 주파수 응답: 지금 취향 목표에 300Hz~3kHz 평균을 맞춘 값
+        List<double[]> curves = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (int i = Math.max(0, all.length() - 8); i < all.length(); i++) {
+            try {
+                JSONObject o = all.getJSONObject(i);
+                double[] c = uncsv(o.optString("curve"));
+                double sh = Dsp.alignShift(c, pref);
+                for (int j = 0; j < Dsp.NF; j++) c[j] -= sh;
+                curves.add(c);
+                names.add(new SimpleDateFormat("M/d HH:mm", Locale.KOREA).format(new Date(o.getLong("t"))));
+            } catch (Exception ignored) { }
+        }
+        if (!curves.isEmpty()) {
+            s.append("\n[기록별 주파수 응답] 1/6옥타브 간격, dB (").append(pref.name).append(" 목표에 맞춤)\nHz, 목표");
+            for (String n : names) s.append(", ").append(n);
+            s.append("\n");
+            for (int i = 0; i < Dsp.NF; i += 4) {
+                s.append(Math.round(Dsp.FR[i])).append(String.format(Locale.US, ", %.1f", Dsp.target(Dsp.FR[i], pref)));
+                for (double[] c : curves) s.append(String.format(Locale.US, ", %.1f", c[i]));
+                s.append("\n");
+            }
+        }
         return s.toString();
     }
 
@@ -1567,7 +1718,7 @@ public class MainActivity extends Activity {
 
     private String buildReport() {
         StringBuilder s = new StringBuilder();
-        s.append("[차량 사운드 측정기 결과 v2]\n");
+        s.append("[차량 사운드 측정기 결과 v3]\n");
         s.append(deviceLine()).append("\n");
         s.append(sourceLine()).append("\n");
         if (!AudioEngine.lastInfo.isEmpty()) s.append("최근 녹음 · ").append(AudioEngine.lastInfo.replace("\n", " / ")).append("\n");
@@ -1610,6 +1761,7 @@ public class MainActivity extends Activity {
         s.append("\n");
         s.append(String.format(Locale.US, "범위(±%.1fdB) 안 %.0f%% · 초과량 %.2fdB · 기울기 %+.2fdB/옥타브 · 편차 ±%.1fdB · 저음 한계 %s · 왜곡 %.1f%% · 신뢰도 %.0fdB · 입력 최대 %.2f\n",
                 TOL, r.inBand, r.excess, r.tilt, r.rms, r.fb <= 20 ? "20Hz 이하" : fmtF(r.fb), r.thd, r.snr, r.clip));
+        s.append("기울기 원인: ").append(tiltCause(r).replace("\n", " ")).append("\n");
         if (r.lr) s.append(String.format(Locale.US, "좌우 음량 차 %+.1fdB(+는 왼쪽이 큼) · 도달 시간 차 %+.1fms(+는 왼쪽이 먼저)\n", r.bal, r.dly));
         if (lastKnob != null) {
             s.append("3밴드 권장 설정값(").append(learned() ? "학습값" : "일반형 추정").append("): 저음 ").append(signed(lastKnob.target[0]))
@@ -1786,7 +1938,9 @@ public class MainActivity extends Activity {
     // ================= 공통 =================
 
     private void updateInfo(boolean afterRecording) {
-        String s = deviceLine() + "\n가공 없는 마이크 입력 지원: " + (AudioEngine.supportsUnprocessed(this) ? "예" : "아니오") + "\n" + sourceLine();
+        String un = AudioEngine.supportsUnprocessed(this) ? "예" : "기기 정보상 미지원";
+        for (DiagItem it : loadDiag()) if (it.src == UNPROCESSED) un = it.valid() ? "예 (진단에서 정상 동작 확인)" : it.d == null ? "아니오 (진단에서 열리지 않음)" : un;
+        String s = deviceLine() + "\n가공 없는 마이크 입력 지원: " + un + "\n" + sourceLine();
         if (afterRecording && !AudioEngine.lastInfo.isEmpty()) s += "\n최근 녹음 · " + AudioEngine.lastInfo;
         info.setText(s);
     }
